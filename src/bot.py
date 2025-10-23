@@ -218,6 +218,23 @@ class IVBot(commands.Bot):
         os.makedirs("data", exist_ok=True)
         self.db = ChartDatabase("data/charts.db")
 
+        # Load whitelisted users for DM access
+        whitelist_str = os.getenv("WHITELISTED_USERS", "")
+        self.whitelisted_users = set()
+        if whitelist_str:
+            for user_id in whitelist_str.split(","):
+                user_id = user_id.strip()
+                if user_id:
+                    try:
+                        self.whitelisted_users.add(int(user_id))
+                    except ValueError:
+                        logger.warning(f"Invalid user ID in WHITELISTED_USERS: {user_id}")
+
+        if self.whitelisted_users:
+            logger.info(f"DM whitelist enabled with {len(self.whitelisted_users)} user(s)")
+        else:
+            logger.info("DM whitelist disabled (all users can use bot in DMs)")
+
     async def setup_hook(self):
         """Setup hook called when bot is ready."""
         await self.tree.sync()
@@ -231,6 +248,32 @@ class IVBot(commands.Bot):
 
 # Initialize bot
 bot = IVBot()
+
+
+def is_dm_whitelisted():
+    """Check decorator to enforce DM whitelist."""
+    async def predicate(interaction: discord.Interaction) -> bool:
+        # If in a guild (server), allow everyone
+        if interaction.guild is not None:
+            return True
+
+        # If in DM and whitelist is empty, allow everyone
+        if not bot.whitelisted_users:
+            return True
+
+        # If in DM and whitelist is enabled, check if user is whitelisted
+        if interaction.user.id in bot.whitelisted_users:
+            return True
+
+        # User not whitelisted for DMs
+        await interaction.response.send_message(
+            "❌ You are not authorized to use this bot in DMs. "
+            "Please use the bot in a server or contact the bot owner for access.",
+            ephemeral=True
+        )
+        return False
+
+    return app_commands.check(predicate)
 
 
 @bot.tree.command(
@@ -248,6 +291,7 @@ bot = IVBot()
     app_commands.Choice(name="Put", value="put")
 ])
 @app_commands.rename(days="days")
+@is_dm_whitelisted()
 async def iv_chart(
     interaction: discord.Interaction,
     ticker: str,
@@ -524,6 +568,7 @@ async def iv_chart(
 @app_commands.describe(
     ticker="Stock ticker symbol (e.g., AAPL, TSLA)"
 )
+@is_dm_whitelisted()
 async def earnings(
     interaction: discord.Interaction,
     ticker: str
