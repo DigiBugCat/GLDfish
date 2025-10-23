@@ -36,18 +36,48 @@ docker-compose down
 
 ## Architecture Overview
 
-This is a Discord bot that generates intraday implied volatility (IV) charts for stock options. It creates dual-axis visualizations showing both price movement (OHLC candles) and IV over time.
+This is a Discord bot that generates implied volatility (IV) charts for stock options. It creates dual-axis visualizations showing both price movement (OHLC candles) and IV over time, supporting lookback periods from 1 day to 1 year.
+
+### Dual-Mode Data Fetching
+
+The bot operates in two modes based on the requested lookback period:
+
+**Intraday Mode (≤ 7 days)**:
+- Uses 1-minute granularity data
+- Stock OHLC: `/api/stock/{ticker}/ohlc/1m` endpoint
+- Option IV: `/api/option-contract/{id}/intraday` endpoint
+- High resolution, minute-by-minute data
+- Limited to 7 trading days due to API restrictions
+
+**Historic Mode (> 7 days, up to ~250 days)**:
+- Uses 4-hour granularity for stock data
+- Stock OHLC: `/api/stock/{ticker}/ohlc/4h` endpoint (271 days available)
+- Option IV: `/api/option-contract/{id}/historic` endpoint (~250 days available)
+- Lower resolution, but extends history significantly
+- Effective limit: ~250 days (constrained by option historic data availability)
 
 ### Data Flow
+
+**Intraday Mode (≤ 7 days)**:
 1. User invokes `/iv_chart` slash command with ticker, expiration, option_type, and days
 2. `UnusualWhalesClient` fetches 1-minute OHLC candles for the underlying ticker
 3. Fetch option chains and filter by expiration date and option type (call/put)
-4. `identify_required_strikes()` determines which strikes become ATM during the time period
+4. `identify_required_strikes_by_date()` determines which strikes become ATM during the time period
 5. Fetch 1-minute IV data for each required strike across all trading dates
 6. `align_data_by_timestamp()` merges OHLC and IV data, interpolating IV based on spot price
 7. `create_iv_chart()` generates matplotlib chart with dual axes
 8. Bot sends chart to Discord with refresh/delete buttons
 9. `ChartDatabase` stores message metadata for button persistence
+
+**Historic Mode (> 7 days)**:
+1. User invokes `/iv_chart` with days > 7
+2. Fetch 4-hour OHLC candles for underlying ticker (up to 271 days available)
+3. Fetch option chains and filter by expiration/type
+4. Identify required strikes from 4h candle data
+5. Fetch historic EOD data for each required strike using `/api/option-contract/{id}/historic`
+6. `align_historic_data()` merges 4h OHLC with historic IV, interpolating based on spot price
+7. Generate chart with 4h candlesticks and IV overlay
+8. Send to Discord with persistent buttons
 
 ### Core Modules
 
@@ -62,9 +92,10 @@ This is a Discord bot that generates intraday implied volatility (IV) charts for
 - `UnusualWhalesClient` class for API interactions
 - Rate limiting: 150ms delay between requests to avoid API limits
 - Endpoints:
-  - `get_ohlc_data()`: Fetch 1-minute OHLC candles
+  - `get_ohlc_data()`: Fetch OHLC candles (supports 1m, 4h, etc. - larger candles = more history)
   - `get_option_chains()`: Fetch available option contracts
-  - `get_option_intraday()`: Fetch 1-minute IV data for specific contract
+  - `get_option_intraday()`: Fetch 1-minute IV data for specific contract (≤7 days)
+  - `get_option_historic()`: Fetch EOD historic data for contract (~250 days, uses `chains` key not `data`)
   - `filter_contracts_by_expiration_and_type()`: Filter chains by expiration and call/put
 
 **src/utils.py**
@@ -77,7 +108,8 @@ This is a Discord bot that generates intraday implied volatility (IV) charts for
 - `interpolate_iv()`: Linear interpolation between strikes
   - Formula: `IV(spot) = IV(lower) + weight * (IV(upper) - IV(lower))`
   - Where `weight = (spot - lower_strike) / (upper_strike - lower_strike)`
-- `align_data_by_timestamp()`: Merge OHLC and IV data by timestamp
+- `align_data_by_timestamp()`: Merge intraday OHLC and IV data by timestamp (for ≤7 day mode)
+- `align_historic_data()`: Merge 4h OHLC with historic IV data by date (for >7 day mode)
 - `get_trading_dates()`: Generate list of trading dates for fetching
 
 **src/chart_generator.py**
@@ -144,6 +176,10 @@ BASE_URL = "https://api.unusualwhales.com"
 
 GET /api/stock/{ticker}/ohlc/{candle_size}
   - Params: start_date, end_date
+  - Candle sizes: 1m, 5m, 15m, 30m, 1h, 4h, 1d
+  - Data availability varies by candle size (API returns ~2500 candles max):
+    * 1m: 4 days
+    * 4h: 271 days (~9 months)
   - Returns: List of OHLC candles with timestamps
 
 GET /api/stock/{ticker}/option-chains
@@ -151,7 +187,17 @@ GET /api/stock/{ticker}/option-chains
 
 GET /api/option-contract/{contract_id}/intraday
   - Params: date (YYYY-MM-DD)
+  - Limited to last 7 trading days
   - Returns: 1-minute IV data for specific contract on specific date
+
+GET /api/option-contract/{contract_id}/historic
+  - No params required
+  - Returns: ~250 days of EOD (end-of-day) historic data for option contract
+  - **IMPORTANT**: Response uses 'chains' key, NOT 'data'!
+  - Response format: {"chains": [{"date": "YYYY-MM-DD", "implied_volatility": "0.XX", ...}, ...]}
+  - Fields include: date, implied_volatility, open_interest, volume, nbbo_bid, nbbo_ask,
+    last_price, iv_low, iv_high, and more
+  - Not all dates have IV data (contracts may exist before being actively traded)
 ```
 
 ### Authentication

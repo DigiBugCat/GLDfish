@@ -274,6 +274,90 @@ def align_data_by_timestamp(
     return aligned_data
 
 
+def align_historic_data(
+    ohlc_data: List[Dict[str, Any]],
+    historic_iv_by_strike: Dict[float, List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """Align 4h OHLC candles with historic option IV data by date.
+
+    This function is used for lookback periods > 7 days where we use:
+    - 4h stock candles (up to 271 days available)
+    - Historic option data (EOD IV snapshots, ~250 days available)
+
+    Args:
+        ohlc_data: List of 4h OHLC candles with timestamps
+        historic_iv_by_strike: Dictionary mapping strikes to their historic daily records
+
+    Returns:
+        List of aligned data points with interpolated IV
+    """
+    aligned_data = []
+
+    # Create lookup for IV by date and strike
+    # Historic data has 'date' field (YYYY-MM-DD) not timestamp
+    iv_lookup: Dict[str, Dict[float, float]] = {}
+
+    for strike, historic_records in historic_iv_by_strike.items():
+        for record in historic_records:
+            date = record.get("date")
+            # Use implied_volatility field from historic endpoint
+            iv_value = record.get("implied_volatility")
+
+            if date and iv_value is not None:
+                try:
+                    iv_float = float(iv_value)
+
+                    if date not in iv_lookup:
+                        iv_lookup[date] = {}
+                    iv_lookup[date][strike] = iv_float
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not parse IV value for strike {strike} on {date}: {iv_value}")
+                    continue
+
+    # Align with OHLC data
+    for candle in ohlc_data:
+        timestamp = candle.get("start_time") or candle.get("timestamp")
+        close_price = candle.get("close")
+
+        if not timestamp or close_price is None:
+            continue
+
+        # Extract date from timestamp (for matching with historic data)
+        try:
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            date_str = dt.strftime("%Y-%m-%d")
+        except Exception as e:
+            logger.warning(f"Could not parse timestamp {timestamp}: {e}")
+            continue
+
+        try:
+            close_float = float(close_price)
+        except (ValueError, TypeError):
+            continue
+
+        # Get IV data for this date
+        strike_to_iv = iv_lookup.get(date_str, {})
+
+        if strike_to_iv:
+            interpolated_iv = interpolate_iv(close_float, strike_to_iv)
+        else:
+            interpolated_iv = None
+
+        aligned_data.append({
+            "timestamp": timestamp,
+            "open": float(candle.get("open", 0)),
+            "high": float(candle.get("high", 0)),
+            "low": float(candle.get("low", 0)),
+            "close": close_float,
+            "volume": int(candle.get("volume", 0)),
+            "iv": interpolated_iv,
+            "market_time": candle.get("market_time")  # Preserve market_time field
+        })
+
+    logger.info(f"Aligned {len(aligned_data)} 4h candles with historic IV data")
+    return aligned_data
+
+
 def get_trading_dates(days_back: int) -> List[str]:
     """Generate list of trading dates going back N days.
 

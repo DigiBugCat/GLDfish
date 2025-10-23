@@ -155,6 +155,41 @@ class UnusualWhalesClient:
         logger.info(f"Fetched {len(intraday_data)} intraday points for {contract_id} on {date}")
         return intraday_data
 
+    async def get_option_historic(
+        self,
+        contract_id: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch historic EOD data for an option contract.
+
+        This endpoint provides ~250 days of end-of-day historical data for an option contract,
+        bypassing the 7-day limit of the intraday endpoint.
+
+        Args:
+            contract_id: Option contract symbol (e.g., "AAPL251017C00150000")
+
+        Returns:
+            List of historic daily records with IV, OI, volume, prices, etc.
+            Each record includes: date, implied_volatility, open_interest, volume,
+            nbbo_bid, nbbo_ask, and more.
+
+        Note:
+            - Response uses 'chains' key, NOT 'data' key!
+            - Not all dates may have IV data (contracts exist before being actively traded)
+            - Typical history: 125-262 days depending on when contract was created
+        """
+        url = f"{self.BASE_URL}/api/option-contract/{contract_id}/historic"
+
+        await self._rate_limit()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+
+        # IMPORTANT: Historic endpoint uses 'chains' key, not 'data'!
+        historic_data = data.get("chains", [])
+        logger.info(f"Fetched {len(historic_data)} historic records for {contract_id}")
+        return historic_data
+
     def parse_option_symbol(self, option_symbol: str) -> Dict[str, Any]:
         """Parse an option symbol to extract components.
 

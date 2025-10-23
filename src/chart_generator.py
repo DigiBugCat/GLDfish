@@ -74,12 +74,29 @@ def create_iv_chart(
     # Convert IV to percentage (multiply by 100)
     df_with_iv["iv_pct"] = df_with_iv["iv"] * 100
 
-    # Apply 15-minute rolling average to smooth IV
+    # Apply smoothing to IV - adaptive based on data frequency
+    # For intraday (1m candles): use 15-min rolling average
+    # For historic (4h candles): use 3-point rolling average (lighter smoothing)
     df_with_iv = df_with_iv.set_index("timestamp")
-    df_with_iv["iv_pct_smoothed"] = df_with_iv["iv_pct"].rolling(
-        window="15min",
-        min_periods=1
-    ).mean()
+
+    # Detect if we're using large candles (4h mode) by checking candle count
+    # If < 100 candles for the period, likely using 4h candles
+    if len(df_with_iv) < 100:
+        # Historic mode: use simple 3-point rolling average
+        df_with_iv["iv_pct_smoothed"] = df_with_iv["iv_pct"].rolling(
+            window=3,
+            min_periods=1,
+            center=True
+        ).mean()
+        smoothing_label = "IV (smoothed)"
+    else:
+        # Intraday mode: use 15-min rolling average
+        df_with_iv["iv_pct_smoothed"] = df_with_iv["iv_pct"].rolling(
+            window="15min",
+            min_periods=1
+        ).mean()
+        smoothing_label = "Implied Volatility (15-min avg)"
+
     df_with_iv = df_with_iv.reset_index()
 
     # Create figure with dual axes
@@ -99,7 +116,7 @@ def create_iv_chart(
         df_with_iv_merged["iv_pct_smoothed"],
         color='#ff9800',
         linewidth=2.5,
-        label="Implied Volatility (15-min avg)",
+        label=smoothing_label,
         alpha=0.9
     )
     ax2.fill_between(
