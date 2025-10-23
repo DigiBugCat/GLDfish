@@ -26,6 +26,30 @@ uv sync
 uv run python -m src.bot
 ```
 
+## Auto-Deployment (Production)
+
+The project includes a git auto-updater that automatically detects commits and rebuilds the bot container.
+
+### How it works:
+1. The `git-updater` container checks GitHub every 60 seconds for new commits
+2. When changes are detected, it automatically pulls and rebuilds the `discord-iv-bot` container
+3. The bot restarts with the latest code within 1-2 minutes of pushing to GitHub
+
+### Viewing logs:
+```bash
+# See auto-updater activity
+docker-compose logs -f git-updater
+
+# See bot logs
+docker-compose logs -f discord-iv-bot
+```
+
+### Configuration:
+- **Branch:** By default monitors the `main` branch. Edit `auto-updater.sh` to change the branch.
+- **Interval:** Checks every 60 seconds. Edit `CHECK_INTERVAL` in `auto-updater.sh` to adjust.
+
+**Note:** The auto-updater requires the Docker socket to be mounted, which is already configured in `docker-compose.yml`.
+
 ## Example
 
 Command in Discord:

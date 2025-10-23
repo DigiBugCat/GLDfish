@@ -17,3 +17,23 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  git-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    container_name: git-updater
+    restart: unless-stopped
+    volumes:
+      # Mount project directory for git access
+      - .:/app
+      # Mount Docker socket to allow container control
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Prevent the updater from trying to update itself
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-discord-iv-bot}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,19 @@
+# Lightweight container for auto-updating Discord bot from git
+FROM alpine:3.19
+
+# Install dependencies: git, docker-cli, and docker-compose
+RUN apk add --no-cache \
+    git \
+    docker-cli \
+    docker-cli-compose \
+    bash
+
+# Set working directory
+WORKDIR /app
+
+# Copy the auto-updater script
+COPY auto-updater.sh /usr/local/bin/auto-updater.sh
+RUN chmod +x /usr/local/bin/auto-updater.sh
+
+# Run the auto-updater script
+CMD ["/usr/local/bin/auto-updater.sh"]
