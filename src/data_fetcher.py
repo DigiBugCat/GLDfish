@@ -59,8 +59,8 @@ class UnusualWhalesClient:
         """
         url = f"{self.BASE_URL}/api/stock/{ticker}/ohlc/{candle_size}"
 
-        # Calculate date range - use yesterday as end date to avoid requesting future data
-        end_date = datetime.now() - timedelta(days=1)
+        # Calculate date range - include today to support realtime data during market hours
+        end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back + 3)  # Add buffer for weekends
 
         params = {

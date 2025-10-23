@@ -284,8 +284,8 @@ def get_trading_dates(days_back: int) -> List[str]:
         List of dates in YYYY-MM-DD format
     """
     dates = []
-    # Start from yesterday to avoid requesting future/today's data
-    current_date = datetime.now() - timedelta(days=1)
+    # Start from today to support realtime data during market hours
+    current_date = datetime.now()
 
     for i in range(days_back + 5):  # Add buffer for weekends
         date = current_date - timedelta(days=i)
