@@ -397,6 +397,132 @@ async def iv_chart(
         )
 
 
+@bot.tree.command(
+    name="earnings",
+    description="Get upcoming earnings date and expected move for a ticker"
+)
+@app_commands.describe(
+    ticker="Stock ticker symbol (e.g., AAPL, TSLA)"
+)
+async def earnings(
+    interaction: discord.Interaction,
+    ticker: str
+):
+    """Get earnings information command handler."""
+    await interaction.response.defer()
+
+    try:
+        ticker = ticker.upper()
+        logger.info(f"Processing earnings request for {ticker}")
+
+        # Fetch earnings data
+        earnings_data = await bot.uw_client.get_earnings(ticker)
+
+        if not earnings_data:
+            await interaction.edit_original_response(
+                content=f"❌ No earnings data found for {ticker}"
+            )
+            return
+
+        # Find the next upcoming earnings (report_date in the future or today)
+        from datetime import datetime
+        today = datetime.now().date()
+
+        upcoming_earnings = None
+        past_earnings = []
+
+        for event in earnings_data:
+            report_date_str = event.get("report_date")
+            if report_date_str:
+                report_date = datetime.strptime(report_date_str, "%Y-%m-%d").date()
+                if report_date >= today:
+                    if upcoming_earnings is None or report_date < datetime.strptime(upcoming_earnings["report_date"], "%Y-%m-%d").date():
+                        upcoming_earnings = event
+                else:
+                    past_earnings.append(event)
+
+        # Sort past earnings by date descending
+        past_earnings.sort(key=lambda x: x.get("report_date", ""), reverse=True)
+
+        # Build response embed
+        embed = discord.Embed(
+            title=f"📊 {ticker} Earnings Information",
+            color=0x00ff00 if upcoming_earnings else 0xff9800
+        )
+
+        if upcoming_earnings:
+            report_date = upcoming_earnings.get("report_date", "N/A")
+            report_time = upcoming_earnings.get("report_time", "N/A").capitalize()
+            expected_move = upcoming_earnings.get("expected_move")
+            expected_move_perc = upcoming_earnings.get("expected_move_perc")
+            street_est = upcoming_earnings.get("street_mean_est")
+
+            # Format expected move
+            move_str = "N/A"
+            if expected_move and expected_move_perc:
+                try:
+                    move_pct = float(expected_move_perc) * 100
+                    move_str = f"${expected_move} ({move_pct:.2f}%)"
+                except:
+                    move_str = f"${expected_move}"
+
+            embed.add_field(
+                name="📅 Next Earnings Date",
+                value=f"**{report_date}** ({report_time})",
+                inline=False
+            )
+            embed.add_field(
+                name="📈 Expected Move",
+                value=move_str,
+                inline=True
+            )
+            if street_est:
+                embed.add_field(
+                    name="💰 Street EPS Estimate",
+                    value=f"${street_est}",
+                    inline=True
+                )
+        else:
+            embed.add_field(
+                name="⚠️ No Upcoming Earnings",
+                value="No future earnings dates found",
+                inline=False
+            )
+
+        # Show most recent past earnings if available
+        if past_earnings:
+            recent = past_earnings[0]
+            actual_eps = recent.get("actual_eps")
+            post_move_1d = recent.get("post_earnings_move_1d")
+
+            recent_info = f"**Date:** {recent.get('report_date', 'N/A')}"
+            if actual_eps:
+                recent_info += f"\n**Actual EPS:** ${actual_eps}"
+            if post_move_1d:
+                try:
+                    move_pct = float(post_move_1d) * 100
+                    recent_info += f"\n**1D Post Move:** {move_pct:+.2f}%"
+                except:
+                    pass
+
+            embed.add_field(
+                name="📝 Most Recent Earnings",
+                value=recent_info,
+                inline=False
+            )
+
+        embed.set_footer(text=f"Data from Unusual Whales • Total records: {len(earnings_data)}")
+
+        await interaction.edit_original_response(embed=embed)
+        logger.info(f"Successfully sent earnings info for {ticker}")
+
+    except Exception as e:
+        logger.error(f"Error fetching earnings: {e}", exc_info=True)
+        await interaction.edit_original_response(
+            content=f"❌ Error fetching earnings data: {str(e)}"
+        )
+
+
 def main():
     """Main entry point for the bot."""
     token = os.getenv("DISCORD_BOT_TOKEN")

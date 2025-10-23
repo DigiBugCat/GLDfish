@@ -231,3 +231,24 @@ class UnusualWhalesClient:
 
         logger.info(f"Filtered to {len(strike_map)} strikes for {expiration_date} {option_type}s")
         return strike_map
+
+    async def get_earnings(self, ticker: str) -> List[Dict[str, Any]]:
+        """Fetch earnings data for a ticker.
+
+        Args:
+            ticker: Stock symbol
+
+        Returns:
+            List of earnings events with dates, estimates, and expected moves
+        """
+        url = f"{self.BASE_URL}/api/earnings/{ticker}"
+
+        await self._rate_limit()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+
+        earnings = data.get("data", [])
+        logger.info(f"Fetched {len(earnings)} earnings records for {ticker}")
+        return earnings
