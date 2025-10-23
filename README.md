@@ -47,13 +47,13 @@ The bot includes refresh and delete buttons on each chart.
 
 1. Gets 1-minute OHLC candles for the ticker
 2. Fetches option chains for the expiration
-3. Identifies which strikes were ATM during the time period
-4. **Optimization**: Only fetches IV data for strikes that matter on each specific day (not all strikes for all days)
+3. For each trading day, identifies which strikes were ATM during that day
+4. Fetches IV data only for the strikes that matter on each specific day
 5. Interpolates IV between strikes based on spot price
 6. Generates matplotlib chart with dual axes
 7. Stores chart metadata in SQLite for button persistence
 
-The optimization in step 4 reduces API calls by 40-70% on multi-day queries. If a stock trades 370-380 on day 1 but 350-400 over 5 days, it won't fetch strike 350 for day 1.
+If a stock trades 370-380 on day 1 but 350-400 over 5 days, it only fetches strikes 370-380 for day 1, not the full 350-400 range.
 
 ## API Configuration
 
