@@ -169,11 +169,12 @@ def create_iv_chart(
     ax1.set_xticks(tick_positions)
     ax1.set_xticklabels(tick_labels, fontsize=10, ha="center")
 
-    # Add vertical lines to separate days
+    # Add vertical lines to separate days (only for short timeframes to avoid clutter)
     df['date_pt'] = df['timestamp_pt'].dt.date
     unique_dates = df['date_pt'].unique()
 
-    if len(unique_dates) > 1:
+    # Only show day separators for ≤10 days (intraday mode), skip for historic mode
+    if len(unique_dates) > 1 and len(unique_dates) <= 10:
         for i in range(1, len(unique_dates)):
             # Find first index of new day
             day_change_idx = df[df['date_pt'] == unique_dates[i]].index[0]

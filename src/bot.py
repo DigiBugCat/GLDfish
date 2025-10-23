@@ -88,17 +88,30 @@ class ChartControlView(View):
                     required_strikes.update(strikes_list)
                 required_strikes = sorted(list(required_strikes))
 
-                # Fetch historic data for each strike
-                historic_iv_by_strike = {}
-                for strike in required_strikes:
-                    contract_id = strike_map[strike]
+                # Fetch historic data for each strike CONCURRENTLY
+                async def fetch_historic_for_strike(strike: float, contract_id: str):
+                    """Fetch historic data for a single strike."""
                     try:
                         historic_records = await self.bot.uw_client.get_option_historic(contract_id)
                         historic_records = [r for r in historic_records if r.get("implied_volatility")]
-                        historic_iv_by_strike[strike] = historic_records
+                        return (strike, historic_records)
                     except Exception as e:
                         logger.warning(f"Failed to fetch historic data for {contract_id}: {e}")
-                        historic_iv_by_strike[strike] = []
+                        return (strike, [])
+
+                # Build list of all tasks
+                tasks = []
+                for strike in required_strikes:
+                    contract_id = strike_map[strike]
+                    tasks.append(fetch_historic_for_strike(strike, contract_id))
+
+                # Execute all tasks concurrently
+                results = await asyncio.gather(*tasks)
+
+                # Build strike map from results
+                historic_iv_by_strike = {}
+                for strike, historic_records in results:
+                    historic_iv_by_strike[strike] = historic_records
 
                 aligned_data = align_historic_data(ohlc_data, historic_iv_by_strike)
 
@@ -348,20 +361,33 @@ async def iv_chart(
                 content=f"Fetching historic IV data for {len(required_strikes)} strikes..."
             )
 
-            # Fetch historic data for each strike
-            historic_iv_by_strike = {}
-
-            for strike in required_strikes:
-                contract_id = strike_map[strike]
+            # Fetch historic data for each strike CONCURRENTLY
+            async def fetch_historic_for_strike(strike: float, contract_id: str):
+                """Fetch historic data for a single strike."""
                 try:
                     historic_records = await bot.uw_client.get_option_historic(contract_id)
                     # Filter out records without IV data
                     historic_records = [r for r in historic_records if r.get("implied_volatility")]
-                    historic_iv_by_strike[strike] = historic_records
                     logger.info(f"Strike ${strike}: {len(historic_records)} historic records with IV")
+                    return (strike, historic_records)
                 except Exception as e:
                     logger.warning(f"Failed to fetch historic data for {contract_id}: {e}")
-                    historic_iv_by_strike[strike] = []
+                    return (strike, [])
+
+            # Build tasks for concurrent execution
+            tasks = []
+            for strike in required_strikes:
+                contract_id = strike_map[strike]
+                tasks.append(fetch_historic_for_strike(strike, contract_id))
+
+            # Execute all historic fetches concurrently
+            logger.info(f"Fetching {len(tasks)} strikes concurrently...")
+            results = await asyncio.gather(*tasks)
+
+            # Organize results
+            historic_iv_by_strike = {}
+            for strike, historic_records in results:
+                historic_iv_by_strike[strike] = historic_records
 
             # Align 4h OHLC with historic IV
             aligned_data = align_historic_data(ohlc_data, historic_iv_by_strike)
