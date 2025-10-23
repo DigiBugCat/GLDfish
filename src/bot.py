@@ -75,23 +75,35 @@ class ChartControlView(View):
 
             iv_data_by_strike = {}
 
+            # Use concurrent fetching for refresh (same as main command)
+            async def fetch_iv_for_strike_date(strike: float, date: str, contract_id: str):
+                """Fetch IV data for a single strike/date combination."""
+                try:
+                    intraday_data = await self.bot.uw_client.get_option_intraday(
+                        contract_id=contract_id,
+                        date=date
+                    )
+                    return (strike, intraday_data)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch IV for {contract_id} on {date}: {e}")
+                    return (strike, [])
+
+            # Build list of all tasks
+            tasks = []
             for date, strikes_for_date in strikes_by_date.items():
                 for strike in strikes_for_date:
                     contract_id = strike_map[strike]
+                    tasks.append(fetch_iv_for_strike_date(strike, date, contract_id))
 
-                    # Initialize strike list if needed
-                    if strike not in iv_data_by_strike:
-                        iv_data_by_strike[strike] = []
+            # Execute all tasks concurrently
+            logger.info(f"Fetching {len(tasks)} strike/date combinations concurrently for refresh...")
+            results = await asyncio.gather(*tasks)
 
-                    try:
-                        intraday_data = await self.bot.uw_client.get_option_intraday(
-                            contract_id=contract_id,
-                            date=date
-                        )
-                        iv_data_by_strike[strike].extend(intraday_data)
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch IV for {contract_id} on {date}: {e}")
-                        continue
+            # Organize results by strike
+            for strike, intraday_data in results:
+                if strike not in iv_data_by_strike:
+                    iv_data_by_strike[strike] = []
+                iv_data_by_strike[strike].extend(intraday_data)
 
             aligned_data = align_data_by_timestamp(ohlc_data, iv_data_by_strike)
 
@@ -281,30 +293,41 @@ async def iv_chart(
             content=f"Fetching IV data ({total_calls} optimized API calls)..."
         )
 
-        # Step 5: Fetch IV data for required strike/date combinations (optimized)
+        # Step 5: Fetch IV data for required strike/date combinations (optimized with concurrency)
         iv_data_by_strike = {}
 
-        for date, strikes_for_date in strikes_by_date.items():
-            logger.info(f"Fetching {len(strikes_for_date)} strikes for {date}")
+        # Create all fetch tasks upfront for concurrent execution
+        async def fetch_iv_for_strike_date(strike: float, date: str, contract_id: str):
+            """Fetch IV data for a single strike/date combination."""
+            try:
+                intraday_data = await bot.uw_client.get_option_intraday(
+                    contract_id=contract_id,
+                    date=date
+                )
+                return (strike, intraday_data)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to fetch IV for {contract_id} on {date}: {e}"
+                )
+                return (strike, [])
 
+        # Build list of all tasks
+        tasks = []
+        for date, strikes_for_date in strikes_by_date.items():
+            logger.info(f"Queuing {len(strikes_for_date)} strikes for {date}")
             for strike in strikes_for_date:
                 contract_id = strike_map[strike]
+                tasks.append(fetch_iv_for_strike_date(strike, date, contract_id))
 
-                # Initialize strike list if needed
-                if strike not in iv_data_by_strike:
-                    iv_data_by_strike[strike] = []
+        # Execute all tasks concurrently (rate limiting handled by _rate_limit())
+        logger.info(f"Fetching {len(tasks)} strike/date combinations concurrently...")
+        results = await asyncio.gather(*tasks)
 
-                try:
-                    intraday_data = await bot.uw_client.get_option_intraday(
-                        contract_id=contract_id,
-                        date=date
-                    )
-                    iv_data_by_strike[strike].extend(intraday_data)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to fetch IV for {contract_id} on {date}: {e}"
-                    )
-                    continue
+        # Organize results by strike
+        for strike, intraday_data in results:
+            if strike not in iv_data_by_strike:
+                iv_data_by_strike[strike] = []
+            iv_data_by_strike[strike].extend(intraday_data)
 
         # Step 6: Align data
         aligned_data = align_data_by_timestamp(ohlc_data, iv_data_by_strike)
