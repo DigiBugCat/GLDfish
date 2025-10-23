@@ -53,9 +53,12 @@ while true; do
 
         echo "[Auto-Updater] Successfully pulled changes"
 
+        # Ensure required directories exist
+        mkdir -p /app/logs /app/data
+
         # Rebuild and restart the Discord bot container
         echo "[Auto-Updater] Rebuilding discord-iv-bot container..."
-        docker-compose up -d --build discord-iv-bot || {
+        docker-compose --project-directory /app -f /app/docker-compose.yml up -d --build discord-iv-bot || {
             echo "[Auto-Updater] ERROR: docker-compose rebuild failed!"
             sleep "$CHECK_INTERVAL"
             continue
