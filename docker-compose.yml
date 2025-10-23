@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  discord-iv-bot:
+    build: .
+    container_name: discord-iv-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,15 @@
+[project]
+name = "discord-iv-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "discord-py>=2.6.4",
+    "httpx>=0.28.1",
+    "matplotlib>=3.10.7",
+    "mplfinance>=0.12.10b0",
+    "pandas>=2.3.3",
+    "python-dateutil>=2.9.0.post0",
+    "python-dotenv>=1.1.1",
+]
