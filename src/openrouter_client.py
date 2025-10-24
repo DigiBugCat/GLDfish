@@ -152,7 +152,6 @@ class OpenRouterClient:
         for i, item in enumerate(news_items, 1):
             tickers = ", ".join(item.get("tickers", []))
             headline = item.get("headline", "")
-            sentiment = item.get("sentiment", "neutral")
             is_major = "⭐ MAJOR" if item.get("is_major", False) else ""
             source = item.get("source", "Unknown")
             created_at = item.get("created_at", "")
@@ -164,7 +163,7 @@ class OpenRouterClient:
             if tickers:
                 line += f"[{tickers}] "
             line += f"{headline}"
-            line += f" ({sentiment}, {source}, {created_at})"
+            line += f" ({source}, {created_at})"
 
             formatted_lines.append(line)
 
