@@ -799,11 +799,11 @@ async def collect_earnings_iv_data(
                 contract_id, parsed = atm_contract
 
                 # Fetch historic IV for this contract (cached if already fetched)
+                iv_value = None
                 try:
                     historic_records = await client.get_option_historic(contract_id)
 
                     # Find IV for the specific analysis date
-                    iv_value = None
                     for record in historic_records:
                         if record.get('date') == analysis_date_str:
                             iv_str = record.get('implied_volatility')
@@ -820,7 +820,27 @@ async def collect_earnings_iv_data(
 
                 except Exception as e:
                     logger.warning(f"Failed to fetch historic IV for {contract_id}: {e}")
-                    continue
+
+                # If we didn't get IV data from current chain contract, try brute force
+                if iv_value is None:
+                    logger.info(f"No historic IV data for {contract_id} on {analysis_date_str}, trying brute force...")
+                    result = await brute_force_find_contract(
+                        client=client,
+                        ticker=ticker,
+                        target_exp_date=target_exp_date,
+                        spot_price=spot_price,
+                        analysis_date_str=analysis_date_str,
+                        option_types=option_types,
+                        available_expirations=available_expirations,
+                        logger=logger
+                    )
+
+                    if result:
+                        contract_id, parsed, iv_value = result
+                        dte_ivs[target_dte] = iv_value
+                        logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% (brute-forced, strike={parsed['strike']})")
+                    else:
+                        logger.warning(f"No contracts found (even with brute force) for DTE={target_dte} on {analysis_date_str}")
 
             # Store this day's data if we got at least some DTEs or OHLC
             if dte_ivs or ohlc:
