@@ -53,6 +53,11 @@ class ChartControlView(View):
         await interaction.response.defer()
 
         try:
+            # Update message to show we're working
+            await interaction.edit_original_response(
+                content=f"🔍 Finding previous expiration for {self.ticker}..."
+            )
+
             # Fetch all available expirations
             expirations = await self.bot.uw_client.get_expiry_breakdown(ticker=self.ticker)
 
@@ -79,6 +84,10 @@ class ChartControlView(View):
             new_expiration = expirations[current_index - 1]
 
             logger.info(f"Navigating from {self.expiration} to previous expiration {new_expiration}")
+
+            await interaction.edit_original_response(
+                content=f"📊 Fetching data for {self.ticker} {self.option_type} {new_expiration}..."
+            )
 
             # Fetch data and regenerate chart (same logic as refresh)
             use_historic_mode = self.days > 7
@@ -192,6 +201,10 @@ class ChartControlView(View):
                 logger.warning(f"Could not fetch earnings data: {e}")
 
             # Generate chart
+            await interaction.edit_original_response(
+                content=f"📈 Generating chart for {new_expiration}..."
+            )
+
             chart_buffer = create_iv_chart(
                 data=aligned_data,
                 ticker=self.ticker,
@@ -233,6 +246,10 @@ class ChartControlView(View):
             new_option_type = "put" if self.option_type == "call" else "call"
 
             logger.info(f"Swapping from {self.option_type} to {new_option_type}")
+
+            await interaction.edit_original_response(
+                content=f"🔄 Switching to {new_option_type}s for {self.ticker} {self.expiration}..."
+            )
 
             # Fetch data and regenerate chart (same logic as refresh)
             use_historic_mode = self.days > 7
@@ -346,6 +363,10 @@ class ChartControlView(View):
                 logger.warning(f"Could not fetch earnings data: {e}")
 
             # Generate chart
+            await interaction.edit_original_response(
+                content=f"📈 Generating {new_option_type} chart..."
+            )
+
             chart_buffer = create_iv_chart(
                 data=aligned_data,
                 ticker=self.ticker,
@@ -383,6 +404,11 @@ class ChartControlView(View):
         await interaction.response.defer()
 
         try:
+            # Update message to show we're working
+            await interaction.edit_original_response(
+                content=f"🔍 Finding next expiration for {self.ticker}..."
+            )
+
             # Fetch all available expirations
             expirations = await self.bot.uw_client.get_expiry_breakdown(ticker=self.ticker)
 
@@ -409,6 +435,10 @@ class ChartControlView(View):
             new_expiration = expirations[current_index + 1]
 
             logger.info(f"Navigating from {self.expiration} to next expiration {new_expiration}")
+
+            await interaction.edit_original_response(
+                content=f"📊 Fetching data for {self.ticker} {self.option_type} {new_expiration}..."
+            )
 
             # Fetch data and regenerate chart (same logic as refresh)
             use_historic_mode = self.days > 7
@@ -522,6 +552,10 @@ class ChartControlView(View):
                 logger.warning(f"Could not fetch earnings data: {e}")
 
             # Generate chart
+            await interaction.edit_original_response(
+                content=f"📈 Generating chart for {new_expiration}..."
+            )
+
             chart_buffer = create_iv_chart(
                 data=aligned_data,
                 ticker=self.ticker,
