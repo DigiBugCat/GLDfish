@@ -1,7 +1,7 @@
 services:
-  discord-iv-bot:
+  gldfish:
     build: .
-    container_name: discord-iv-bot
+    container_name: gldfish
     restart: unless-stopped
     env_file:
       - .env

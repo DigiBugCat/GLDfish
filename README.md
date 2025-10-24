@@ -1,4 +1,4 @@
-# Discord IV Bot
+# GLDfish
 
 Discord bot that generates intraday implied volatility charts for stock options. Shows price (OHLC candles) and IV on a dual-axis chart.
 
@@ -32,7 +32,7 @@ The project includes a git auto-updater that automatically detects commits and r
 
 ### How it works:
 1. The `git-updater` container checks GitHub every 60 seconds for new commits
-2. When changes are detected, it automatically pulls and rebuilds the `discord-iv-bot` container
+2. When changes are detected, it automatically pulls and rebuilds the `gldfish` container
 3. The bot restarts with the latest code within 1-2 minutes of pushing to GitHub
 
 ### Viewing logs:
@@ -41,7 +41,7 @@ The project includes a git auto-updater that automatically detects commits and r
 docker-compose logs -f git-updater
 
 # See bot logs
-docker-compose logs -f discord-iv-bot
+docker-compose logs -f gldfish
 ```
 
 ### Configuration:
