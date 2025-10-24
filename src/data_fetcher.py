@@ -390,7 +390,7 @@ class UnusualWhalesClient:
         self,
         major_only: bool = False,
         hours_back: int = 4,
-        max_pages: int = 10
+        max_pages: int = 1000
     ) -> List[Dict[str, Any]]:
         """Fetch recent financial news headlines with pagination.
 
@@ -400,7 +400,7 @@ class UnusualWhalesClient:
         Args:
             major_only: If True, only return major market-moving news
             hours_back: Number of hours to look back for news
-            max_pages: Maximum number of pages to fetch (safety limit)
+            max_pages: Maximum number of pages to fetch (safety limit, default 1000 = 100k items max)
 
         Returns:
             List of news headline dictionaries with:
