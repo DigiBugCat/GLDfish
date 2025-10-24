@@ -51,7 +51,8 @@ class UnusualWhalesClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         max_retries: int = 3,
-        base_delay: float = 30.0
+        base_delay: float = 1.0,
+        max_delay: float = 30.0
     ) -> httpx.Response:
         """Make HTTP request with exponential backoff retry on 429 errors.
 
@@ -60,7 +61,8 @@ class UnusualWhalesClient:
             url: Request URL
             params: Query parameters
             max_retries: Maximum number of retry attempts
-            base_delay: Base delay in seconds for exponential backoff (default 30s, then 60s, 120s)
+            base_delay: Base delay in seconds for exponential backoff (default 1s)
+            max_delay: Maximum delay cap in seconds (default 30s)
 
         Returns:
             HTTP response
@@ -88,9 +90,9 @@ class UnusualWhalesClient:
                     if e.response.status_code == 429:
                         # Rate limit exceeded
                         if attempt < max_retries - 1:
-                            # Calculate exponential backoff: 30s, 60s, 120s
-                            delay = base_delay * (2 ** attempt)
-                            logger.warning(f"Rate limit hit (429), waiting {delay:.0f}s before retry {attempt + 1}/{max_retries}")
+                            # Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped)
+                            delay = min(base_delay * (2 ** attempt), max_delay)
+                            logger.warning(f"Rate limit hit (429), waiting {delay:.1f}s before retry {attempt + 1}/{max_retries}")
                             await asyncio.sleep(delay)
                             continue
                         else:
