@@ -874,6 +874,52 @@ async def iv_chart(
             )
             return
 
+        # Find closest available expiration to the requested date
+        await interaction.edit_original_response(
+            content=f"Finding closest expiration to {expiration_formatted}..."
+        )
+
+        # Store the original requested expiration for comparison
+        requested_expiration = expiration_formatted
+        expiration_note = ""
+
+        try:
+            available_expirations = await bot.uw_client.get_expiry_breakdown(ticker=ticker)
+
+            if not available_expirations:
+                await interaction.edit_original_response(
+                    content=f"❌ No option expirations found for {ticker}"
+                )
+                return
+
+            # Find the closest expiration date
+            from datetime import datetime as dt
+            target_date = dt.strptime(expiration_formatted, "%Y-%m-%d")
+
+            closest_expiration = min(
+                available_expirations,
+                key=lambda exp: abs((dt.strptime(exp, "%Y-%m-%d") - target_date).days)
+            )
+
+            # Calculate the difference in days
+            closest_date = dt.strptime(closest_expiration, "%Y-%m-%d")
+            days_diff = (closest_date - target_date).days
+
+            if closest_expiration != expiration_formatted:
+                diff_str = f"{abs(days_diff)} day{'s' if abs(days_diff) != 1 else ''} {'later' if days_diff > 0 else 'earlier'}"
+                logger.info(f"Using closest expiration {closest_expiration} ({diff_str}) instead of exact {expiration_formatted}")
+                expiration_note = f" *(closest to {requested_expiration}, {diff_str})*"
+                expiration_formatted = closest_expiration
+            else:
+                logger.info(f"Found exact match for expiration {expiration_formatted}")
+
+        except Exception as e:
+            logger.error(f"Error finding closest expiration: {e}", exc_info=True)
+            await interaction.edit_original_response(
+                content=f"❌ Error finding available expirations: {str(e)}"
+            )
+            return
+
         # Determine which mode to use based on lookback period
         use_historic_mode = days > 7
 
@@ -1119,7 +1165,7 @@ async def iv_chart(
         # Send chart with final update to original response
         file = discord.File(chart_buffer, filename="iv_chart.png")
         await interaction.edit_original_response(
-            content=f"**{ticker} {option_type.name} IV Chart** (Exp: {expiration_formatted})",
+            content=f"**{ticker} {option_type.name} IV Chart** (Exp: {expiration_formatted}){expiration_note}",
             attachments=[file],
             view=view
         )
