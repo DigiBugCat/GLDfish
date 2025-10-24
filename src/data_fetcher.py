@@ -41,6 +41,62 @@ class UnusualWhalesClient:
 
         self._last_request_time = time.time()
 
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+        base_delay: float = 60.0
+    ) -> httpx.Response:
+        """Make HTTP request with exponential backoff retry on 429 errors.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            url: Request URL
+            params: Query parameters
+            max_retries: Maximum number of retry attempts
+            base_delay: Base delay in seconds for exponential backoff (default 60s for per-minute limits)
+
+        Returns:
+            HTTP response
+
+        Raises:
+            httpx.HTTPStatusError: If request fails after all retries
+        """
+        await self._rate_limit()
+
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.request(
+                        method=method,
+                        url=url,
+                        headers=self.headers,
+                        params=params
+                    )
+                    response.raise_for_status()
+                    return response
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    # Rate limit exceeded
+                    if attempt < max_retries - 1:
+                        # Calculate exponential backoff: 60s, 120s, 240s
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"Rate limit hit (429), waiting {delay}s before retry {attempt + 1}/{max_retries}")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"Rate limit hit (429), exhausted all {max_retries} retries")
+                        raise
+                else:
+                    # Other HTTP error, don't retry
+                    raise
+
+        # Should never reach here, but just in case
+        raise Exception("Request failed after all retries")
+
     async def get_ohlc_data(
         self,
         ticker: str,
@@ -77,11 +133,8 @@ class UnusualWhalesClient:
             }
             logger.info(f"Fetching {candle_size} candles for {ticker} from {params['start_date']} to {params['end_date']}")
 
-        await self._rate_limit()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self.headers, params=params)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._request_with_retry("GET", url, params=params)
+        data = response.json()
 
         all_data = data.get("data", [])
 
@@ -140,11 +193,8 @@ class UnusualWhalesClient:
         if date:
             params["date"] = date
 
-        await self._rate_limit()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self.headers, params=params)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._request_with_retry("GET", url, params=params)
+        data = response.json()
 
         contracts = data.get("data", [])
         logger.info(f"Fetched {len(contracts)} option contracts for {ticker}")
@@ -167,11 +217,8 @@ class UnusualWhalesClient:
         url = f"{self.BASE_URL}/api/option-contract/{contract_id}/intraday"
         params = {"date": date}
 
-        await self._rate_limit()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self.headers, params=params)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._request_with_retry("GET", url, params=params)
+        data = response.json()
 
         intraday_data = data.get("data", [])
         logger.info(f"Fetched {len(intraday_data)} intraday points for {contract_id} on {date}")
@@ -201,11 +248,8 @@ class UnusualWhalesClient:
         """
         url = f"{self.BASE_URL}/api/option-contract/{contract_id}/historic"
 
-        await self._rate_limit()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self.headers)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._request_with_retry("GET", url)
+        data = response.json()
 
         # IMPORTANT: Historic endpoint uses 'chains' key, not 'data'!
         historic_data = data.get("chains", [])
@@ -300,11 +344,8 @@ class UnusualWhalesClient:
         """
         url = f"{self.BASE_URL}/api/earnings/{ticker}"
 
-        await self._rate_limit()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self.headers)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._request_with_retry("GET", url)
+        data = response.json()
 
         earnings = data.get("data", [])
         logger.info(f"Fetched {len(earnings)} earnings records for {ticker}")
@@ -329,11 +370,8 @@ class UnusualWhalesClient:
         if date:
             params["date"] = date
 
-        await self._rate_limit()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=self.headers, params=params)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._request_with_retry("GET", url, params=params)
+        data = response.json()
 
         # Extract expiry dates from response (API uses "expires" not "expiry")
         expirations = [item.get("expires") for item in data.get("data", []) if item.get("expires")]
