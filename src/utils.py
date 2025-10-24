@@ -637,12 +637,11 @@ async def discover_contracts_for_period(
         primary_exp = find_nearest_expiration(target_exp_date)
 
         # Try multiple nearby expirations to find one with historic data
+        # Reduced to ±1 week to avoid excessive API calls
         expirations_to_try = [
-            primary_exp - timedelta(weeks=2),
             primary_exp - timedelta(weeks=1),
             primary_exp,
             primary_exp + timedelta(weeks=1),
-            primary_exp + timedelta(weeks=2),
         ]
 
         # Generate smart strikes
@@ -650,7 +649,11 @@ async def discover_contracts_for_period(
 
         # Try each expiration until we find one with data
         found = False
-        for exp_date in expirations_to_try:
+        for i, exp_date in enumerate(expirations_to_try):
+            # Add small delay between expiration attempts to avoid rate limiting
+            if i > 0:
+                await asyncio.sleep(0.3)
+
             # Try first strike only to check if this expiration has historic data
             test_strike = strikes[0]
             for opt_type_code in option_types:
