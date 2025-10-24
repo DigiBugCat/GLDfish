@@ -47,6 +47,512 @@ class ChartControlView(View):
         self.user_id = user_id
         self.bot = bot_instance
 
+    @discord.ui.button(label="◀ Prev Exp", style=discord.ButtonStyle.secondary)
+    async def prev_expiration_button(self, interaction: discord.Interaction, button: Button):
+        """Navigate to previous expiration date."""
+        await interaction.response.defer()
+
+        try:
+            # Fetch all available expirations
+            expirations = await self.bot.uw_client.get_expiry_breakdown(ticker=self.ticker)
+
+            if not expirations:
+                await interaction.followup.send("❌ Could not fetch available expirations", ephemeral=True)
+                return
+
+            # Sort expirations chronologically
+            expirations = sorted(expirations)
+
+            # Find current expiration index
+            try:
+                current_index = expirations.index(self.expiration)
+            except ValueError:
+                await interaction.followup.send("❌ Current expiration not found in available expirations", ephemeral=True)
+                return
+
+            # Check if we can go to previous
+            if current_index == 0:
+                await interaction.followup.send("⚠️ Already at the earliest expiration", ephemeral=True)
+                return
+
+            # Get previous expiration
+            new_expiration = expirations[current_index - 1]
+
+            logger.info(f"Navigating from {self.expiration} to previous expiration {new_expiration}")
+
+            # Fetch data and regenerate chart (same logic as refresh)
+            use_historic_mode = self.days > 7
+            candle_size = "4h" if use_historic_mode else "1m"
+
+            ohlc_data = await self.bot.uw_client.get_ohlc_data(
+                ticker=self.ticker,
+                candle_size=candle_size,
+                days_back=self.days
+            )
+
+            contracts = await self.bot.uw_client.get_option_chains(ticker=self.ticker)
+
+            strike_map = self.bot.uw_client.filter_contracts_by_expiration_and_type(
+                contracts=contracts,
+                expiration_date=new_expiration,
+                option_type=self.option_type
+            )
+
+            if not strike_map:
+                await interaction.followup.send(f"❌ No {self.option_type} contracts found for {new_expiration}", ephemeral=True)
+                return
+
+            available_strikes = list(strike_map.keys())
+            strikes_by_date = identify_required_strikes_by_date(ohlc_data, available_strikes)
+
+            if use_historic_mode:
+                required_strikes = set()
+                for strikes_list in strikes_by_date.values():
+                    required_strikes.update(strikes_list)
+                required_strikes = sorted(list(required_strikes))
+
+                async def fetch_historic_for_strike(strike: float, contract_id: str):
+                    try:
+                        historic_records = await self.bot.uw_client.get_option_historic(contract_id)
+                        historic_records = [r for r in historic_records if r.get("implied_volatility")]
+                        return (strike, historic_records)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch historic data for {contract_id}: {e}")
+                        return (strike, [])
+
+                tasks = [fetch_historic_for_strike(strike, strike_map[strike]) for strike in required_strikes]
+                results = await asyncio.gather(*tasks)
+
+                historic_iv_by_strike = {strike: records for strike, records in results}
+                aligned_data = align_historic_data(ohlc_data, historic_iv_by_strike)
+            else:
+                iv_data_by_strike = {}
+
+                async def fetch_iv_for_strike_date(strike: float, date: str, contract_id: str):
+                    try:
+                        intraday_data = await self.bot.uw_client.get_option_intraday(
+                            contract_id=contract_id,
+                            date=date
+                        )
+                        return (strike, intraday_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch IV for {contract_id} on {date}: {e}")
+                        return (strike, [])
+
+                tasks = []
+                for date, strikes_for_date in strikes_by_date.items():
+                    for strike in strikes_for_date:
+                        contract_id = strike_map[strike]
+                        tasks.append(fetch_iv_for_strike_date(strike, date, contract_id))
+
+                results = await asyncio.gather(*tasks)
+
+                for strike, intraday_data in results:
+                    if strike not in iv_data_by_strike:
+                        iv_data_by_strike[strike] = []
+                    iv_data_by_strike[strike].extend(intraday_data)
+
+                aligned_data = align_data_by_timestamp(ohlc_data, iv_data_by_strike)
+
+            if not aligned_data:
+                await interaction.followup.send("❌ Could not align data for new expiration", ephemeral=True)
+                return
+
+            # Fetch earnings dates
+            earnings_dates = []
+            try:
+                earnings_data = await self.bot.uw_client.get_earnings(self.ticker)
+                if earnings_data and ohlc_data:
+                    from datetime import datetime as dt
+
+                    ohlc_timestamps = []
+                    for candle in ohlc_data:
+                        timestamp_str = candle.get("start_time") or candle.get("timestamp")
+                        if timestamp_str:
+                            try:
+                                ts = dt.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                ohlc_timestamps.append(ts)
+                            except:
+                                continue
+
+                    if ohlc_timestamps:
+                        chart_start = min(ohlc_timestamps).replace(tzinfo=None)
+                        chart_end = max(ohlc_timestamps).replace(tzinfo=None)
+
+                        for event in earnings_data:
+                            report_date_str = event.get("report_date")
+                            if report_date_str:
+                                try:
+                                    report_date = dt.strptime(report_date_str, "%Y-%m-%d")
+                                    if chart_start <= report_date <= chart_end:
+                                        earnings_dates.append(report_date_str)
+                                except:
+                                    continue
+            except Exception as e:
+                logger.warning(f"Could not fetch earnings data: {e}")
+
+            # Generate chart
+            chart_buffer = create_iv_chart(
+                data=aligned_data,
+                ticker=self.ticker,
+                expiration=new_expiration,
+                option_type=self.option_type,
+                days=self.days,
+                earnings_dates=earnings_dates if earnings_dates else None
+            )
+
+            # Update database
+            self.bot.db.update_chart(
+                message_id=interaction.message.id,
+                expiration=new_expiration
+            )
+
+            # Update instance variable
+            self.expiration = new_expiration
+
+            # Edit message
+            file = discord.File(chart_buffer, filename="iv_chart.png")
+            await interaction.edit_original_response(
+                content=f"**{self.ticker} {self.option_type.capitalize()} IV Chart** (Exp: {new_expiration})",
+                attachments=[file]
+            )
+
+            logger.info(f"Successfully navigated to previous expiration {new_expiration}")
+
+        except Exception as e:
+            logger.error(f"Error navigating to previous expiration: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+    @discord.ui.button(label="Swap Call/Put", style=discord.ButtonStyle.secondary)
+    async def swap_option_type_button(self, interaction: discord.Interaction, button: Button):
+        """Swap between call and put options."""
+        await interaction.response.defer()
+
+        try:
+            # Toggle option type
+            new_option_type = "put" if self.option_type == "call" else "call"
+
+            logger.info(f"Swapping from {self.option_type} to {new_option_type}")
+
+            # Fetch data and regenerate chart (same logic as refresh)
+            use_historic_mode = self.days > 7
+            candle_size = "4h" if use_historic_mode else "1m"
+
+            ohlc_data = await self.bot.uw_client.get_ohlc_data(
+                ticker=self.ticker,
+                candle_size=candle_size,
+                days_back=self.days
+            )
+
+            contracts = await self.bot.uw_client.get_option_chains(ticker=self.ticker)
+
+            strike_map = self.bot.uw_client.filter_contracts_by_expiration_and_type(
+                contracts=contracts,
+                expiration_date=self.expiration,
+                option_type=new_option_type
+            )
+
+            if not strike_map:
+                await interaction.followup.send(f"❌ No {new_option_type} contracts found for {self.expiration}", ephemeral=True)
+                return
+
+            available_strikes = list(strike_map.keys())
+            strikes_by_date = identify_required_strikes_by_date(ohlc_data, available_strikes)
+
+            if use_historic_mode:
+                required_strikes = set()
+                for strikes_list in strikes_by_date.values():
+                    required_strikes.update(strikes_list)
+                required_strikes = sorted(list(required_strikes))
+
+                async def fetch_historic_for_strike(strike: float, contract_id: str):
+                    try:
+                        historic_records = await self.bot.uw_client.get_option_historic(contract_id)
+                        historic_records = [r for r in historic_records if r.get("implied_volatility")]
+                        return (strike, historic_records)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch historic data for {contract_id}: {e}")
+                        return (strike, [])
+
+                tasks = [fetch_historic_for_strike(strike, strike_map[strike]) for strike in required_strikes]
+                results = await asyncio.gather(*tasks)
+
+                historic_iv_by_strike = {strike: records for strike, records in results}
+                aligned_data = align_historic_data(ohlc_data, historic_iv_by_strike)
+            else:
+                iv_data_by_strike = {}
+
+                async def fetch_iv_for_strike_date(strike: float, date: str, contract_id: str):
+                    try:
+                        intraday_data = await self.bot.uw_client.get_option_intraday(
+                            contract_id=contract_id,
+                            date=date
+                        )
+                        return (strike, intraday_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch IV for {contract_id} on {date}: {e}")
+                        return (strike, [])
+
+                tasks = []
+                for date, strikes_for_date in strikes_by_date.items():
+                    for strike in strikes_for_date:
+                        contract_id = strike_map[strike]
+                        tasks.append(fetch_iv_for_strike_date(strike, date, contract_id))
+
+                results = await asyncio.gather(*tasks)
+
+                for strike, intraday_data in results:
+                    if strike not in iv_data_by_strike:
+                        iv_data_by_strike[strike] = []
+                    iv_data_by_strike[strike].extend(intraday_data)
+
+                aligned_data = align_data_by_timestamp(ohlc_data, iv_data_by_strike)
+
+            if not aligned_data:
+                await interaction.followup.send(f"❌ Could not align data for {new_option_type}", ephemeral=True)
+                return
+
+            # Fetch earnings dates
+            earnings_dates = []
+            try:
+                earnings_data = await self.bot.uw_client.get_earnings(self.ticker)
+                if earnings_data and ohlc_data:
+                    from datetime import datetime as dt
+
+                    ohlc_timestamps = []
+                    for candle in ohlc_data:
+                        timestamp_str = candle.get("start_time") or candle.get("timestamp")
+                        if timestamp_str:
+                            try:
+                                ts = dt.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                ohlc_timestamps.append(ts)
+                            except:
+                                continue
+
+                    if ohlc_timestamps:
+                        chart_start = min(ohlc_timestamps).replace(tzinfo=None)
+                        chart_end = max(ohlc_timestamps).replace(tzinfo=None)
+
+                        for event in earnings_data:
+                            report_date_str = event.get("report_date")
+                            if report_date_str:
+                                try:
+                                    report_date = dt.strptime(report_date_str, "%Y-%m-%d")
+                                    if chart_start <= report_date <= chart_end:
+                                        earnings_dates.append(report_date_str)
+                                except:
+                                    continue
+            except Exception as e:
+                logger.warning(f"Could not fetch earnings data: {e}")
+
+            # Generate chart
+            chart_buffer = create_iv_chart(
+                data=aligned_data,
+                ticker=self.ticker,
+                expiration=self.expiration,
+                option_type=new_option_type,
+                days=self.days,
+                earnings_dates=earnings_dates if earnings_dates else None
+            )
+
+            # Update database
+            self.bot.db.update_chart(
+                message_id=interaction.message.id,
+                option_type=new_option_type
+            )
+
+            # Update instance variable
+            self.option_type = new_option_type
+
+            # Edit message
+            file = discord.File(chart_buffer, filename="iv_chart.png")
+            await interaction.edit_original_response(
+                content=f"**{self.ticker} {new_option_type.capitalize()} IV Chart** (Exp: {self.expiration})",
+                attachments=[file]
+            )
+
+            logger.info(f"Successfully swapped to {new_option_type}")
+
+        except Exception as e:
+            logger.error(f"Error swapping option type: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+    @discord.ui.button(label="Next Exp ▶", style=discord.ButtonStyle.secondary)
+    async def next_expiration_button(self, interaction: discord.Interaction, button: Button):
+        """Navigate to next expiration date."""
+        await interaction.response.defer()
+
+        try:
+            # Fetch all available expirations
+            expirations = await self.bot.uw_client.get_expiry_breakdown(ticker=self.ticker)
+
+            if not expirations:
+                await interaction.followup.send("❌ Could not fetch available expirations", ephemeral=True)
+                return
+
+            # Sort expirations chronologically
+            expirations = sorted(expirations)
+
+            # Find current expiration index
+            try:
+                current_index = expirations.index(self.expiration)
+            except ValueError:
+                await interaction.followup.send("❌ Current expiration not found in available expirations", ephemeral=True)
+                return
+
+            # Check if we can go to next
+            if current_index >= len(expirations) - 1:
+                await interaction.followup.send("⚠️ Already at the latest expiration", ephemeral=True)
+                return
+
+            # Get next expiration
+            new_expiration = expirations[current_index + 1]
+
+            logger.info(f"Navigating from {self.expiration} to next expiration {new_expiration}")
+
+            # Fetch data and regenerate chart (same logic as refresh)
+            use_historic_mode = self.days > 7
+            candle_size = "4h" if use_historic_mode else "1m"
+
+            ohlc_data = await self.bot.uw_client.get_ohlc_data(
+                ticker=self.ticker,
+                candle_size=candle_size,
+                days_back=self.days
+            )
+
+            contracts = await self.bot.uw_client.get_option_chains(ticker=self.ticker)
+
+            strike_map = self.bot.uw_client.filter_contracts_by_expiration_and_type(
+                contracts=contracts,
+                expiration_date=new_expiration,
+                option_type=self.option_type
+            )
+
+            if not strike_map:
+                await interaction.followup.send(f"❌ No {self.option_type} contracts found for {new_expiration}", ephemeral=True)
+                return
+
+            available_strikes = list(strike_map.keys())
+            strikes_by_date = identify_required_strikes_by_date(ohlc_data, available_strikes)
+
+            if use_historic_mode:
+                required_strikes = set()
+                for strikes_list in strikes_by_date.values():
+                    required_strikes.update(strikes_list)
+                required_strikes = sorted(list(required_strikes))
+
+                async def fetch_historic_for_strike(strike: float, contract_id: str):
+                    try:
+                        historic_records = await self.bot.uw_client.get_option_historic(contract_id)
+                        historic_records = [r for r in historic_records if r.get("implied_volatility")]
+                        return (strike, historic_records)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch historic data for {contract_id}: {e}")
+                        return (strike, [])
+
+                tasks = [fetch_historic_for_strike(strike, strike_map[strike]) for strike in required_strikes]
+                results = await asyncio.gather(*tasks)
+
+                historic_iv_by_strike = {strike: records for strike, records in results}
+                aligned_data = align_historic_data(ohlc_data, historic_iv_by_strike)
+            else:
+                iv_data_by_strike = {}
+
+                async def fetch_iv_for_strike_date(strike: float, date: str, contract_id: str):
+                    try:
+                        intraday_data = await self.bot.uw_client.get_option_intraday(
+                            contract_id=contract_id,
+                            date=date
+                        )
+                        return (strike, intraday_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch IV for {contract_id} on {date}: {e}")
+                        return (strike, [])
+
+                tasks = []
+                for date, strikes_for_date in strikes_by_date.items():
+                    for strike in strikes_for_date:
+                        contract_id = strike_map[strike]
+                        tasks.append(fetch_iv_for_strike_date(strike, date, contract_id))
+
+                results = await asyncio.gather(*tasks)
+
+                for strike, intraday_data in results:
+                    if strike not in iv_data_by_strike:
+                        iv_data_by_strike[strike] = []
+                    iv_data_by_strike[strike].extend(intraday_data)
+
+                aligned_data = align_data_by_timestamp(ohlc_data, iv_data_by_strike)
+
+            if not aligned_data:
+                await interaction.followup.send("❌ Could not align data for new expiration", ephemeral=True)
+                return
+
+            # Fetch earnings dates
+            earnings_dates = []
+            try:
+                earnings_data = await self.bot.uw_client.get_earnings(self.ticker)
+                if earnings_data and ohlc_data:
+                    from datetime import datetime as dt
+
+                    ohlc_timestamps = []
+                    for candle in ohlc_data:
+                        timestamp_str = candle.get("start_time") or candle.get("timestamp")
+                        if timestamp_str:
+                            try:
+                                ts = dt.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                ohlc_timestamps.append(ts)
+                            except:
+                                continue
+
+                    if ohlc_timestamps:
+                        chart_start = min(ohlc_timestamps).replace(tzinfo=None)
+                        chart_end = max(ohlc_timestamps).replace(tzinfo=None)
+
+                        for event in earnings_data:
+                            report_date_str = event.get("report_date")
+                            if report_date_str:
+                                try:
+                                    report_date = dt.strptime(report_date_str, "%Y-%m-%d")
+                                    if chart_start <= report_date <= chart_end:
+                                        earnings_dates.append(report_date_str)
+                                except:
+                                    continue
+            except Exception as e:
+                logger.warning(f"Could not fetch earnings data: {e}")
+
+            # Generate chart
+            chart_buffer = create_iv_chart(
+                data=aligned_data,
+                ticker=self.ticker,
+                expiration=new_expiration,
+                option_type=self.option_type,
+                days=self.days,
+                earnings_dates=earnings_dates if earnings_dates else None
+            )
+
+            # Update database
+            self.bot.db.update_chart(
+                message_id=interaction.message.id,
+                expiration=new_expiration
+            )
+
+            # Update instance variable
+            self.expiration = new_expiration
+
+            # Edit message
+            file = discord.File(chart_buffer, filename="iv_chart.png")
+            await interaction.edit_original_response(
+                content=f"**{self.ticker} {self.option_type.capitalize()} IV Chart** (Exp: {new_expiration})",
+                attachments=[file]
+            )
+
+            logger.info(f"Successfully navigated to next expiration {new_expiration}")
+
+        except Exception as e:
+            logger.error(f"Error navigating to next expiration: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, emoji="🔄")
     async def refresh_button(self, interaction: discord.Interaction, button: Button):
         """Refresh the chart with latest data."""

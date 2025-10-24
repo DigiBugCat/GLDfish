@@ -820,28 +820,43 @@ async def collect_earnings_iv_data(
         logger.info(f"Processing earnings date: {earnings_date_str}")
         earnings_date = datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
 
-        # DISCOVERY PHASE: Find contracts that existed during this period
-        first_analysis_date = earnings_date - timedelta(days=days_window)
-        first_analysis_date_str = first_analysis_date.strftime("%Y-%m-%d")
+        # Determine strategy based on earnings age
+        today = datetime.now().date()
+        earnings_age_days = (today - earnings_date).days
+        use_discovery = earnings_age_days > 60  # Use discovery for old earnings (> 60 days)
 
-        # Get spot price for discovery
-        first_ohlc = ohlc_by_date.get(first_analysis_date_str)
-        if not first_ohlc:
-            logger.warning(f"No OHLC data for first analysis date {first_analysis_date_str}, skipping earnings period")
-            continue
+        discovered_contracts = None
 
-        discovery_spot = first_ohlc['close']
+        if use_discovery:
+            # OLD EARNINGS (> 60 days): Current chains won't have expired contracts
+            # Run discovery phase upfront
+            logger.info(f"Earnings is {earnings_age_days} days old, using DISCOVERY mode")
 
-        # Discover contracts for this entire earnings period
-        discovered_contracts = await discover_contracts_for_period(
-            client=client,
-            ticker=ticker,
-            reference_date_str=first_analysis_date_str,
-            spot_price=discovery_spot,
-            dte_buckets=dte_buckets,
-            option_types=option_types,
-            logger=logger
-        )
+            first_analysis_date = earnings_date - timedelta(days=days_window)
+            first_analysis_date_str = first_analysis_date.strftime("%Y-%m-%d")
+
+            # Get spot price for discovery
+            first_ohlc = ohlc_by_date.get(first_analysis_date_str)
+            if not first_ohlc:
+                logger.warning(f"No OHLC data for first analysis date {first_analysis_date_str}, skipping earnings period")
+                continue
+
+            discovery_spot = first_ohlc['close']
+
+            # Discover contracts for this entire earnings period
+            discovered_contracts = await discover_contracts_for_period(
+                client=client,
+                ticker=ticker,
+                reference_date_str=first_analysis_date_str,
+                spot_price=discovery_spot,
+                dte_buckets=dte_buckets,
+                option_types=option_types,
+                logger=logger
+            )
+        else:
+            # RECENT EARNINGS (< 60 days): Contracts still in current chains
+            # Will try current chains first in the date loop
+            logger.info(f"Earnings is {earnings_age_days} days old, using CURRENT CHAINS mode")
 
         earnings_data_points = {}
 
@@ -862,51 +877,98 @@ async def collect_earnings_iv_data(
 
             spot_price = ohlc['close']
 
-            # For each DTE bucket, use discovered contract to get IV
+            # For each DTE bucket, find IV data using appropriate strategy
             dte_ivs = {}
 
             for target_dte in dte_buckets:
-                # Check if we discovered a contract for this DTE
-                discovered_info = discovered_contracts.get(target_dte)
-                if not discovered_info:
-                    # No contract found during discovery phase
-                    continue
-
-                exp_date, opt_type_name = discovered_info
-
-                # Find ATM strike for current spot price
-                strikes = generate_smart_strikes(spot_price, max_strikes=6)
                 iv_value = None
 
-                # Try each strike to find one with IV data
-                for strike in strikes:
-                    opt_type_code = 'C' if opt_type_name == 'call' else 'P'
-                    exp_str = exp_date.strftime("%y%m%d")
-                    strike_code = f"{int(strike * 1000):08d}"
-                    contract_id = f"{ticker}{exp_str}{opt_type_code}{strike_code}"
-
-                    try:
-                        historic_records = await client.get_option_historic(contract_id)
-
-                        # Find IV for this specific analysis date
-                        for record in historic_records:
-                            if record.get('date') == analysis_date_str:
-                                iv_str = record.get('implied_volatility')
-                                if iv_str:
-                                    try:
-                                        iv_value = float(iv_str) * 100  # Convert to percentage
-                                        dte_ivs[target_dte] = iv_value
-                                        logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% (strike=${strike})")
-                                        break
-                                    except:
-                                        pass
-
-                        if iv_value is not None:
-                            break  # Found IV, stop trying strikes
-
-                    except Exception as e:
-                        # This strike/contract doesn't exist or has no data, try next strike
+                if use_discovery:
+                    # DISCOVERY MODE: Use pre-discovered contracts
+                    discovered_info = discovered_contracts.get(target_dte) if discovered_contracts else None
+                    if not discovered_info:
+                        # No contract found during discovery phase
                         continue
+
+                    exp_date, opt_type_name = discovered_info
+
+                    # Find ATM strike for current spot price
+                    strikes = generate_smart_strikes(spot_price, max_strikes=6)
+
+                    # Try each strike to find one with IV data
+                    for strike in strikes:
+                        opt_type_code = 'C' if opt_type_name == 'call' else 'P'
+                        exp_str = exp_date.strftime("%y%m%d")
+                        strike_code = f"{int(strike * 1000):08d}"
+                        contract_id = f"{ticker}{exp_str}{opt_type_code}{strike_code}"
+
+                        try:
+                            historic_records = await client.get_option_historic(contract_id)
+
+                            # Find IV for this specific analysis date
+                            for record in historic_records:
+                                if record.get('date') == analysis_date_str:
+                                    iv_str = record.get('implied_volatility')
+                                    if iv_str:
+                                        try:
+                                            iv_value = float(iv_str) * 100
+                                            dte_ivs[target_dte] = iv_value
+                                            logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% (discovery, strike=${strike})")
+                                            break
+                                        except:
+                                            pass
+
+                            if iv_value is not None:
+                                break
+
+                        except Exception as e:
+                            continue
+
+                else:
+                    # CURRENT CHAINS MODE: Try current chains first
+                    target_exp_date = analysis_date + timedelta(days=target_dte)
+
+                    # Find contracts with expiration close to target (±3 days tolerance)
+                    candidate_contracts = []
+                    for contract_id, parsed in parsed_contracts.items():
+                        exp_date = datetime.strptime(parsed['expiration'], "%Y-%m-%d").date()
+                        days_diff = abs((exp_date - target_exp_date).days)
+
+                        if days_diff <= 3:
+                            candidate_contracts.append((contract_id, parsed, days_diff))
+
+                    if candidate_contracts:
+                        # Sort by expiration match quality
+                        candidate_contracts.sort(key=lambda x: x[2])
+
+                        # Find ATM strike among candidates
+                        for contract_id, parsed, _ in candidate_contracts:
+                            strike = parsed['strike']
+                            strike_diff = abs(strike - spot_price)
+
+                            # Only consider strikes within ±10% of spot
+                            if strike_diff / spot_price <= 0.10:
+                                try:
+                                    historic_records = await client.get_option_historic(contract_id)
+
+                                    # Find IV for this specific analysis date
+                                    for record in historic_records:
+                                        if record.get('date') == analysis_date_str:
+                                            iv_str = record.get('implied_volatility')
+                                            if iv_str:
+                                                try:
+                                                    iv_value = float(iv_str) * 100
+                                                    dte_ivs[target_dte] = iv_value
+                                                    logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% (current chains, strike=${strike})")
+                                                    break
+                                                except:
+                                                    pass
+
+                                    if iv_value is not None:
+                                        break
+
+                                except Exception as e:
+                                    continue
 
                 if iv_value is None:
                     logger.debug(f"  {analysis_date_str} DTE{target_dte}: No IV data found")

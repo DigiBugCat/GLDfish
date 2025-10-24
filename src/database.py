@@ -98,6 +98,59 @@ class ChartDatabase:
             return dict(row)
         return None
 
+    def update_chart(
+        self,
+        message_id: int,
+        expiration: Optional[str] = None,
+        option_type: Optional[str] = None
+    ) -> bool:
+        """Update chart metadata (expiration and/or option_type).
+
+        Args:
+            message_id: Discord message ID
+            expiration: New option expiration date (YYYY-MM-DD), optional
+            option_type: New option type ("call" or "put"), optional
+
+        Returns:
+            True if successful
+        """
+        try:
+            # Build dynamic update query based on provided parameters
+            updates = []
+            params = []
+
+            if expiration is not None:
+                updates.append("expiration = ?")
+                params.append(expiration)
+
+            if option_type is not None:
+                updates.append("option_type = ?")
+                params.append(option_type)
+
+            if not updates:
+                logger.warning(f"No updates provided for chart {message_id}")
+                return False
+
+            # Add message_id to params
+            params.append(message_id)
+
+            query = f"""
+                UPDATE chart_messages
+                SET {', '.join(updates)}
+                WHERE message_id = ?
+            """
+
+            with self.conn:
+                cursor = self.conn.execute(query, params)
+
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Updated chart message {message_id}: expiration={expiration}, option_type={option_type}")
+            return updated
+        except Exception as e:
+            logger.error(f"Failed to update chart message: {e}")
+            return False
+
     def delete_chart(self, message_id: int) -> bool:
         """Delete chart metadata.
 

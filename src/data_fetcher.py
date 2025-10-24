@@ -16,6 +16,8 @@ class UnusualWhalesClient:
     BASE_URL = "https://api.unusualwhales.com"
     # Rate limiting: delay between requests (in seconds)
     REQUEST_DELAY = 0.15  # 150ms between requests to avoid rate limits
+    # Concurrency limit: maximum number of simultaneous requests
+    MAX_CONCURRENT_REQUESTS = 4  # Limit to 4 concurrent requests to avoid overwhelming API
 
     def __init__(self, api_key: str):
         """Initialize the API client.
@@ -29,6 +31,8 @@ class UnusualWhalesClient:
             "Accept": "application/json"
         }
         self._last_request_time = 0.0
+        # Semaphore to limit concurrent requests
+        self._semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
 
     async def _rate_limit(self):
         """Apply rate limiting between API requests."""
@@ -64,38 +68,40 @@ class UnusualWhalesClient:
         Raises:
             httpx.HTTPStatusError: If request fails after all retries
         """
-        await self._rate_limit()
+        # Use semaphore to limit concurrent requests
+        async with self._semaphore:
+            await self._rate_limit()
 
-        for attempt in range(max_retries):
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.request(
-                        method=method,
-                        url=url,
-                        headers=self.headers,
-                        params=params
-                    )
-                    response.raise_for_status()
-                    return response
+            for attempt in range(max_retries):
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.request(
+                            method=method,
+                            url=url,
+                            headers=self.headers,
+                            params=params
+                        )
+                        response.raise_for_status()
+                        return response
 
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429:
-                    # Rate limit exceeded
-                    if attempt < max_retries - 1:
-                        # Calculate exponential backoff: 30s, 60s, 120s
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(f"Rate limit hit (429), waiting {delay:.0f}s before retry {attempt + 1}/{max_retries}")
-                        await asyncio.sleep(delay)
-                        continue
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429:
+                        # Rate limit exceeded
+                        if attempt < max_retries - 1:
+                            # Calculate exponential backoff: 30s, 60s, 120s
+                            delay = base_delay * (2 ** attempt)
+                            logger.warning(f"Rate limit hit (429), waiting {delay:.0f}s before retry {attempt + 1}/{max_retries}")
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error(f"Rate limit hit (429), exhausted all {max_retries} retries")
+                            raise
                     else:
-                        logger.error(f"Rate limit hit (429), exhausted all {max_retries} retries")
+                        # Other HTTP error, don't retry
                         raise
-                else:
-                    # Other HTTP error, don't retry
-                    raise
 
-        # Should never reach here, but just in case
-        raise Exception("Request failed after all retries")
+            # Should never reach here, but just in case
+            raise Exception("Request failed after all retries")
 
     async def get_ohlc_data(
         self,
