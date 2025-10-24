@@ -229,31 +229,33 @@ Keep it factual, direct, and concise (2-3 paragraphs max). Report the news, don'
         # Randomly select a prophecy style
         styles = [
             {
-                "name": "classic_8ball",
-                "description": "Classic magic 8-ball style - short, cryptic one-liners",
+                "name": "shitpost_8ball",
+                "description": "Absurdist 8-ball - extremely confident about completely vague things",
                 "examples": [
-                    "The charts whisper of turbulence ahead",
-                    "Fortune favors the patient holder",
-                    "Uncertainty clouds the crystal ball",
-                    "The market spirits are restless tonight"
+                    "Reply hazy, try again (but like, definitely avoid Tuesdays)",
+                    "My sources say yes, but my sources are vibes and one (1) headline",
+                    "Outlook not so good, but also I'm literally a magic 8-ball so grain of salt",
+                    "Cannot predict now, the spirits are busy arguing on Twitter"
                 ]
             },
             {
-                "name": "fortune_cookie",
-                "description": "Fortune cookie style - pithy financial wisdom",
+                "name": "fortune_shitpost",
+                "description": "Unhinged fortune cookie wisdom that's technically correct",
                 "examples": [
-                    "When the Fed speaks softly, the market carries a big stick",
-                    "He who chases every dip finds his portfolio depleted",
-                    "The wise trader reads the tea leaves, the foolish one reads only the ticker"
+                    "Man who buy high and sell low will learn expensive lesson about gravity",
+                    "The market can remain irrational longer than you can remain solvent, but have you tried being more irrational?",
+                    "In the land of the blind, the one-eyed man is still refreshing his portfolio at 3am",
+                    "When in doubt, zoom out (or in, or sideways, chart is chart)"
                 ]
             },
             {
-                "name": "oracle",
-                "description": "Oracle/tarot reader style - mystical and dramatic",
+                "name": "galaxy_brain",
+                "description": "Pseudo-intellectual nonsense that sounds profound but means nothing",
                 "examples": [
-                    "I see great volatility in your future. The spirits of earnings reports stir uneasily...",
-                    "The cards reveal a path shrouded in uncertainty. Forces beyond mortal ken shape the market's destiny",
-                    "Beware the full moon earnings call. The auguries speak of turbulent waters ahead"
+                    "The dialectical tension between the bid-ask spread and the collective unconscious suggests a non-euclidean path forward",
+                    "I have gazed into the void of market efficiency and the void has sent me 47 push notifications",
+                    "The neo-keynesian implications of this headline point to either up, down, or sideways - the trinity of price action",
+                    "Quantum superposition theory suggests your portfolio is both up AND down until you check it (schrodinger's port)"
                 ]
             }
         ]
@@ -263,11 +265,11 @@ Keep it factual, direct, and concise (2-3 paragraphs max). Report the news, don'
         # Build the prophecy prompt
         question_text = user_question if user_question else "What does the market hold?"
 
-        prompt = f"""You are a mystical financial oracle with the gift of vague prophecy. Based on recent market headlines, you will generate ONE cryptic prophecy.
+        prompt = f"""You are a financial shitpost oracle - the vibe is "smart people goofing around". You've read the news and now you're going to make an absurd but technically-news-informed prophecy.
 
 User's Question: {question_text}
 
-Recent Major Market Headlines (last 8 hours):
+Recent Market Headlines (last 8 hours):
 {formatted_news}
 
 Style: {selected_style['name']} - {selected_style['description']}
@@ -275,15 +277,15 @@ Examples of this style:
 {chr(10).join(f'- "{ex}"' for ex in selected_style['examples'])}
 
 Instructions:
-1. Generate ONE prophecy in the selected style based on the headlines
-2. Be vague and cryptic - DO NOT give explicit buy/sell advice
-3. Reference themes from the news without being specific (e.g., "tech giants" not "Apple")
-4. Use mystical, fortune-teller language
-5. DO NOT be explicitly bullish or bearish - be enigmatic and open to interpretation
-6. Keep it short (1-3 sentences max)
-7. Channel the energy of a cryptic fortune teller who has glimpsed market secrets
+1. Generate ONE shitpost prophecy loosely based on themes from the headlines
+2. Be vague and absurd - this is a SHITPOST not actual advice
+3. Reference news themes in a silly way (e.g., "the bonds are bond-ing", "manufacturing is... manufacturing")
+4. Use internet humor, meme energy, unhinged confidence about vague things
+5. DO NOT give real advice - this is comedy, not finance
+6. Keep it punchy (1-3 sentences max)
+7. Channel the energy of a very confident magic 8-ball that read Bloomberg once
 
-Generate your prophecy now (ONLY output the prophecy, no explanation):"""
+Generate your shitpost prophecy now (ONLY output the prophecy, no explanation):"""
 
         # Call OpenRouter API
         url = f"{self.BASE_URL}/chat/completions"
@@ -297,7 +299,7 @@ Generate your prophecy now (ONLY output the prophecy, no explanation):"""
                 }
             ],
             "max_tokens": 200,
-            "temperature": 0.9  # Higher temperature for more creative/mystical responses
+            "temperature": 1.0  # Maximum temperature for peak shitpost energy
         }
 
         try:
@@ -320,5 +322,5 @@ Generate your prophecy now (ONLY output the prophecy, no explanation):"""
 
         except Exception as e:
             logger.error(f"Error calling OpenRouter API for prophecy: {e}", exc_info=True)
-            # Return a fallback mystical message
-            return "🔮 The spirits are silent... the market's mysteries remain veiled for now."
+            # Return a fallback shitpost message
+            return "Error 404: Prophecy Not Found. Have you tried turning the market off and on again?"

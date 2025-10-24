@@ -1626,7 +1626,7 @@ async def eight_ball(
 
         # Fetch recent news headlines from last 8 hours
         await interaction.edit_original_response(
-            content="🔮 The oracle peers into the market's soul..."
+            content="🎱 *shaking the magic 8-ball vigorously*"
         )
 
         news_items = await bot.uw_client.get_news_headlines(
@@ -1637,7 +1637,7 @@ async def eight_ball(
         if not news_items:
             # No news available - return fallback prophecy
             await interaction.edit_original_response(
-                content="🔮 *The spirits are silent... the market's mysteries remain veiled for now.*"
+                content="🎱 *Ask again later (the 8-ball is on a smoke break)*"
             )
             return
 
@@ -1647,13 +1647,13 @@ async def eight_ball(
         if not filtered_news:
             # No news in time window - return fallback prophecy
             await interaction.edit_original_response(
-                content="🔮 *The spirits are silent... the market's mysteries remain veiled for now.*"
+                content="🎱 *Reply hazy, try again (or don't, I'm an 8-ball not a cop)*"
             )
             return
 
         # Generate prophecy
         await interaction.edit_original_response(
-            content="🔮 The oracle channels the market spirits..."
+            content="🎱 *consulting the vibes...*"
         )
 
         prophecy = await bot.openrouter_client.generate_prophecy(
@@ -1661,9 +1661,9 @@ async def eight_ball(
             user_question=question
         )
 
-        # Create mystical embed
+        # Create shitpost embed
         embed = discord.Embed(
-            title="🔮 The Oracle Speaks",
+            title="🎱 The Magic 8-Ball Has Spoken",
             description=f"*{prophecy}*",
             color=discord.Color.purple(),
             timestamp=datetime.now()
@@ -1671,24 +1671,24 @@ async def eight_ball(
 
         if question:
             embed.add_field(
-                name="Your Question",
+                name="You Asked",
                 value=question,
                 inline=False
             )
 
         embed.add_field(
-            name="Divination Source",
-            value=f"Last 8 hours of market events",
+            name="Vibes Checked",
+            value=f"Last 8 hours of financial chaos",
             inline=True
         )
 
         embed.add_field(
-            name="Omens Consulted",
-            value=f"{len(filtered_news)} headlines",
+            name="Headlines Skimmed",
+            value=f"{len(filtered_news)} (very thoroughly)",
             inline=True
         )
 
-        embed.set_footer(text="⚠️ For mystical entertainment purposes only • Not financial advice")
+        embed.set_footer(text="⚠️ This is a shitpost • Obviously not financial advice • Do not be like this")
 
         await interaction.edit_original_response(
             content=None,
