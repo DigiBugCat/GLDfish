@@ -204,3 +204,121 @@ Instructions:
 Keep it factual, direct, and concise (2-3 paragraphs max). Report the news, don't interpret beyond what's explicitly stated."""
 
         return prompt
+
+    async def generate_prophecy(
+        self,
+        news_items: List[Dict[str, Any]],
+        user_question: str = None
+    ) -> str:
+        """Generate a mystical financial prophecy based on recent news.
+
+        Args:
+            news_items: List of news headline dictionaries from UW API
+            user_question: Optional user question (e.g., "Should I buy TSLA?")
+
+        Returns:
+            A cryptic, vague prophecy string
+        """
+        import random
+
+        await self._rate_limit()
+
+        # Format news items for the prompt
+        formatted_news = self._format_news_for_prompt(news_items)
+
+        # Randomly select a prophecy style
+        styles = [
+            {
+                "name": "classic_8ball",
+                "description": "Classic magic 8-ball style - short, cryptic one-liners",
+                "examples": [
+                    "The charts whisper of turbulence ahead",
+                    "Fortune favors the patient holder",
+                    "Uncertainty clouds the crystal ball",
+                    "The market spirits are restless tonight"
+                ]
+            },
+            {
+                "name": "fortune_cookie",
+                "description": "Fortune cookie style - pithy financial wisdom",
+                "examples": [
+                    "When the Fed speaks softly, the market carries a big stick",
+                    "He who chases every dip finds his portfolio depleted",
+                    "The wise trader reads the tea leaves, the foolish one reads only the ticker"
+                ]
+            },
+            {
+                "name": "oracle",
+                "description": "Oracle/tarot reader style - mystical and dramatic",
+                "examples": [
+                    "I see great volatility in your future. The spirits of earnings reports stir uneasily...",
+                    "The cards reveal a path shrouded in uncertainty. Forces beyond mortal ken shape the market's destiny",
+                    "Beware the full moon earnings call. The auguries speak of turbulent waters ahead"
+                ]
+            }
+        ]
+
+        selected_style = random.choice(styles)
+
+        # Build the prophecy prompt
+        question_text = user_question if user_question else "What does the market hold?"
+
+        prompt = f"""You are a mystical financial oracle with the gift of vague prophecy. Based on recent market headlines, you will generate ONE cryptic prophecy.
+
+User's Question: {question_text}
+
+Recent Major Market Headlines (last 8 hours):
+{formatted_news}
+
+Style: {selected_style['name']} - {selected_style['description']}
+Examples of this style:
+{chr(10).join(f'- "{ex}"' for ex in selected_style['examples'])}
+
+Instructions:
+1. Generate ONE prophecy in the selected style based on the headlines
+2. Be vague and cryptic - DO NOT give explicit buy/sell advice
+3. Reference themes from the news without being specific (e.g., "tech giants" not "Apple")
+4. Use mystical, fortune-teller language
+5. DO NOT be explicitly bullish or bearish - be enigmatic and open to interpretation
+6. Keep it short (1-3 sentences max)
+7. Channel the energy of a cryptic fortune teller who has glimpsed market secrets
+
+Generate your prophecy now (ONLY output the prophecy, no explanation):"""
+
+        # Call OpenRouter API
+        url = f"{self.BASE_URL}/chat/completions"
+
+        payload = {
+            "model": self.MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 200,
+            "temperature": 0.9  # Higher temperature for more creative/mystical responses
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    headers=self.headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                # Extract the prophecy from response
+                prophecy = data["choices"][0]["message"]["content"].strip()
+                # Remove any quotes if the AI wrapped the response
+                prophecy = prophecy.strip('"\'')
+
+                logger.info(f"Generated prophecy in {selected_style['name']} style")
+                return prophecy
+
+        except Exception as e:
+            logger.error(f"Error calling OpenRouter API for prophecy: {e}", exc_info=True)
+            # Return a fallback mystical message
+            return "🔮 The spirits are silent... the market's mysteries remain veiled for now."

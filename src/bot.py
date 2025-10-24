@@ -1599,6 +1599,111 @@ async def market_news(
         )
 
 
+@bot.tree.command(
+    name="8ball",
+    description="🔮 Consult the mystical financial oracle for cryptic prophecies"
+)
+@app_commands.describe(
+    question="Your question for the oracle (e.g., 'Should I buy TSLA?')"
+)
+@is_dm_whitelisted()
+async def eight_ball(
+    interaction: discord.Interaction,
+    question: Optional[str] = None
+):
+    """Generate mystical financial prophecy based on recent major news."""
+    await interaction.response.defer()
+
+    try:
+        # Check if OpenRouter client is available
+        if not bot.openrouter_client:
+            await interaction.edit_original_response(
+                content="❌ The oracle is unavailable. OPENROUTER_API_KEY is not configured."
+            )
+            return
+
+        logger.info(f"Processing 8ball prophecy request: question='{question or 'none'}'")
+
+        # Fetch major news headlines from last 8 hours
+        await interaction.edit_original_response(
+            content="🔮 The oracle peers into the market's soul..."
+        )
+
+        news_items = await bot.uw_client.get_news_headlines(
+            major_only=True,  # Only major news for prophecies
+            hours_back=8      # Last 8 hours
+        )
+
+        if not news_items:
+            # No news available - return fallback prophecy
+            await interaction.edit_original_response(
+                content="🔮 *The spirits are silent... the market's mysteries remain veiled for now.*"
+            )
+            return
+
+        # Filter by time window
+        filtered_news = bot.openrouter_client.filter_news_by_time(news_items, hours=8)
+
+        if not filtered_news:
+            # No news in time window - return fallback prophecy
+            await interaction.edit_original_response(
+                content="🔮 *The spirits are silent... the market's mysteries remain veiled for now.*"
+            )
+            return
+
+        # Generate prophecy
+        await interaction.edit_original_response(
+            content="🔮 The oracle channels the market spirits..."
+        )
+
+        prophecy = await bot.openrouter_client.generate_prophecy(
+            news_items=filtered_news,
+            user_question=question
+        )
+
+        # Create mystical embed
+        embed = discord.Embed(
+            title="🔮 The Oracle Speaks",
+            description=f"*{prophecy}*",
+            color=discord.Color.purple(),
+            timestamp=datetime.now()
+        )
+
+        if question:
+            embed.add_field(
+                name="Your Question",
+                value=question,
+                inline=False
+            )
+
+        embed.add_field(
+            name="Divination Source",
+            value=f"Last 8 hours of major market events",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Omens Consulted",
+            value=f"{len(filtered_news)} headlines",
+            inline=True
+        )
+
+        embed.set_footer(text="⚠️ For mystical entertainment purposes only • Not financial advice")
+
+        await interaction.edit_original_response(
+            content=None,
+            embed=embed
+        )
+
+        logger.info(f"Successfully generated 8ball prophecy based on {len(filtered_news)} headlines")
+
+    except Exception as e:
+        logger.error(f"Error in 8ball command: {e}", exc_info=True)
+        await interaction.edit_original_response(
+            content=f"❌ The oracle's vision is clouded: {str(e)}"
+        )
+
+
 def main():
     """Main entry point for the bot."""
     token = os.getenv("DISCORD_BOT_TOKEN")
