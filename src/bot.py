@@ -13,6 +13,7 @@ from dateutil import parser as date_parser
 from datetime import datetime
 
 from .data_fetcher import UnusualWhalesClient
+from .openrouter_client import OpenRouterClient
 from .utils import (
     identify_required_strikes,
     identify_required_strikes_by_date,
@@ -797,6 +798,15 @@ class IVBot(commands.Bot):
 
         self.uw_client = UnusualWhalesClient(api_key)
 
+        # Initialize OpenRouter client
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        if openrouter_key:
+            self.openrouter_client = OpenRouterClient(openrouter_key)
+            logger.info("OpenRouter client initialized for AI news summarization")
+        else:
+            self.openrouter_client = None
+            logger.warning("OPENROUTER_API_KEY not found - /market_news command will be disabled")
+
         # Initialize database
         os.makedirs("data", exist_ok=True)
         self.db = ChartDatabase("data/charts.db")
@@ -1457,6 +1467,135 @@ async def earnings_iv(
         await interaction.edit_original_response(
             content="❌ An error occurred while generating the earnings IV chart:",
             attachments=[file]
+        )
+
+
+@bot.tree.command(
+    name="market_news",
+    description="Get AI-powered market news summary from recent headlines"
+)
+@app_commands.describe(
+    question="Optional question about market events (e.g., 'Why is GLD dropping?')",
+    hours="Hours to look back (1-24, default: 4)",
+    major_only="Only include major market-moving news"
+)
+@app_commands.rename(hours="hours")
+@is_dm_whitelisted()
+async def market_news(
+    interaction: discord.Interaction,
+    question: Optional[str] = None,
+    hours: app_commands.Range[int, 1, 24] = 4,
+    major_only: bool = False
+):
+    """Generate AI-powered market news summary."""
+    await interaction.response.defer()
+
+    try:
+        # Check if OpenRouter client is available
+        if not bot.openrouter_client:
+            await interaction.edit_original_response(
+                content="❌ AI news summarization is not available. OPENROUTER_API_KEY is not configured."
+            )
+            return
+
+        logger.info(
+            f"Processing market news request: hours={hours}, major_only={major_only}, "
+            f"question='{question or 'none'}'"
+        )
+
+        # Fetch news headlines with pagination
+        await interaction.edit_original_response(
+            content=f"🔍 Fetching market news from the last {hours} hours..."
+        )
+
+        news_items = await bot.uw_client.get_news_headlines(
+            major_only=major_only,
+            hours_back=hours
+        )
+
+        if not news_items:
+            await interaction.edit_original_response(
+                content=f"❌ No news items found in the last {hours} hours."
+            )
+            return
+
+        # Filter by time window
+        await interaction.edit_original_response(
+            content=f"⏰ Filtering {len(news_items)} items by {hours}-hour time window..."
+        )
+
+        filtered_news = bot.openrouter_client.filter_news_by_time(news_items, hours)
+
+        if not filtered_news:
+            await interaction.edit_original_response(
+                content=f"❌ No news items found within the last {hours} hours after filtering."
+            )
+            return
+
+        # Generate AI summary
+        await interaction.edit_original_response(
+            content=f"🤖 Analyzing {len(filtered_news)} headlines with Claude Haiku 4.5..."
+        )
+
+        summary = await bot.openrouter_client.summarize_news(
+            news_items=filtered_news,
+            user_query=question,
+            hours=hours
+        )
+
+        # Count major news items
+        major_count = sum(1 for item in filtered_news if item.get("is_major", False))
+
+        # Create Discord embed
+        embed = discord.Embed(
+            title="📰 Market News Summary",
+            description=summary,
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        if question:
+            embed.add_field(
+                name="Your Question",
+                value=question,
+                inline=False
+            )
+
+        embed.add_field(
+            name="Time Range",
+            value=f"Last {hours} hour{'s' if hours != 1 else ''}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Headlines Analyzed",
+            value=f"{len(filtered_news)} items",
+            inline=True
+        )
+
+        if major_count > 0:
+            embed.add_field(
+                name="Major Events",
+                value=f"{major_count} major",
+                inline=True
+            )
+
+        embed.set_footer(text="Powered by Claude Haiku 4.5 via OpenRouter")
+
+        await interaction.edit_original_response(
+            content=None,
+            embed=embed
+        )
+
+        logger.info(
+            f"Successfully generated market news summary: {len(filtered_news)} headlines, "
+            f"{major_count} major events"
+        )
+
+    except Exception as e:
+        logger.error(f"Error in market_news command: {e}", exc_info=True)
+        await interaction.edit_original_response(
+            content=f"❌ Error generating news summary: {str(e)}"
         )
 
 

@@ -1,0 +1,206 @@
+"""OpenRouter API client for AI-powered news summarization."""
+
+import httpx
+import asyncio
+import time
+import logging
+from typing import List, Dict, Any
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+
+class OpenRouterClient:
+    """Client for interacting with OpenRouter API using Claude Haiku 4.5."""
+
+    BASE_URL = "https://openrouter.ai/api/v1"
+    MODEL = "anthropic/claude-haiku-4.5"
+    REQUEST_DELAY = 0.1  # 100ms between requests
+
+    def __init__(self, api_key: str):
+        """Initialize the OpenRouter client.
+
+        Args:
+            api_key: OpenRouter API key
+        """
+        self.api_key = api_key
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/DigiBugCat/GLDfish",
+            "X-Title": "GLDfish Discord Bot"
+        }
+        self._last_request_time = 0.0
+
+    async def _rate_limit(self):
+        """Apply rate limiting between API requests."""
+        current_time = time.time()
+        time_since_last_request = current_time - self._last_request_time
+
+        if time_since_last_request < self.REQUEST_DELAY:
+            delay = self.REQUEST_DELAY - time_since_last_request
+            await asyncio.sleep(delay)
+
+        self._last_request_time = time.time()
+
+    def filter_news_by_time(
+        self,
+        news_items: List[Dict[str, Any]],
+        hours: int
+    ) -> List[Dict[str, Any]]:
+        """Filter news items by timestamp.
+
+        Args:
+            news_items: List of news items with created_at timestamps
+            hours: Number of hours to look back
+
+        Returns:
+            Filtered list of news items within the time window
+        """
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        filtered_items = []
+
+        for item in news_items:
+            created_at_str = item.get("created_at", "")
+            if not created_at_str:
+                continue
+
+            try:
+                # Parse ISO 8601 timestamp
+                created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                created_at = created_at.replace(tzinfo=None)  # Remove timezone for comparison
+
+                if created_at >= cutoff_time:
+                    filtered_items.append(item)
+            except Exception as e:
+                logger.warning(f"Could not parse timestamp {created_at_str}: {e}")
+                continue
+
+        logger.info(f"Filtered {len(filtered_items)} news items from last {hours} hours (out of {len(news_items)} total)")
+        return filtered_items
+
+    async def summarize_news(
+        self,
+        news_items: List[Dict[str, Any]],
+        user_query: str = None,
+        hours: int = 4
+    ) -> str:
+        """Summarize market news using Claude Haiku 4.5.
+
+        Args:
+            news_items: List of news headline dictionaries from UW API
+            user_query: Optional user question/query
+            hours: Number of hours of news being analyzed
+
+        Returns:
+            AI-generated summary string
+        """
+        await self._rate_limit()
+
+        # Format news items for the prompt
+        formatted_news = self._format_news_for_prompt(news_items)
+
+        # Build the prompt
+        prompt = self._build_prompt(formatted_news, user_query, hours)
+
+        # Call OpenRouter API
+        url = f"{self.BASE_URL}/chat/completions"
+
+        payload = {
+            "model": self.MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.7
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    headers=self.headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                # Extract the summary from response
+                summary = data["choices"][0]["message"]["content"]
+
+                logger.info(f"Generated news summary using {self.MODEL}")
+                return summary
+
+        except Exception as e:
+            logger.error(f"Error calling OpenRouter API: {e}", exc_info=True)
+            raise
+
+    def _format_news_for_prompt(self, news_items: List[Dict[str, Any]]) -> str:
+        """Format news items into a readable string for the AI prompt.
+
+        Args:
+            news_items: List of news dictionaries
+
+        Returns:
+            Formatted string with all news items
+        """
+        formatted_lines = []
+
+        for i, item in enumerate(news_items, 1):
+            tickers = ", ".join(item.get("tickers", []))
+            headline = item.get("headline", "")
+            sentiment = item.get("sentiment", "neutral")
+            is_major = "⭐ MAJOR" if item.get("is_major", False) else ""
+            source = item.get("source", "Unknown")
+            created_at = item.get("created_at", "")
+
+            # Format each news item
+            line = f"{i}. "
+            if is_major:
+                line += f"{is_major} "
+            if tickers:
+                line += f"[{tickers}] "
+            line += f"{headline}"
+            line += f" ({sentiment}, {source}, {created_at})"
+
+            formatted_lines.append(line)
+
+        return "\n".join(formatted_lines)
+
+    def _build_prompt(
+        self,
+        formatted_news: str,
+        user_query: str = None,
+        hours: int = 4
+    ) -> str:
+        """Build the AI prompt for news summarization.
+
+        Args:
+            formatted_news: Formatted string of all news items
+            user_query: Optional user question
+            hours: Number of hours of news
+
+        Returns:
+            Complete prompt string
+        """
+        query_text = user_query if user_query else "What's happening in the market right now?"
+
+        prompt = f"""You are a financial market analyst. Analyze these recent market news headlines and provide a concise, insightful summary.
+
+User Question: {query_text}
+
+News Headlines (last {hours} hours):
+{formatted_news}
+
+Provide a clear, actionable summary that:
+1. Identifies key market themes and events
+2. Explains notable price movements and their causes
+3. Provides relevant context and implications
+4. Directly answers the user's specific question if provided
+
+Keep it concise (2-3 paragraphs max), professional, and focused on what matters most to traders and investors."""
+
+        return prompt

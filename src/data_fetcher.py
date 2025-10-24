@@ -385,3 +385,87 @@ class UnusualWhalesClient:
         expirations = [item.get("expires") for item in data.get("data", []) if item.get("expires")]
         logger.info(f"Fetched {len(expirations)} available expirations for {ticker}")
         return expirations
+
+    async def get_news_headlines(
+        self,
+        major_only: bool = False,
+        hours_back: int = 4,
+        max_pages: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent financial news headlines with pagination.
+
+        Fetches pages of news until we're outside the time window or hit max_pages.
+        This ensures we get ALL news within the time window, not just first 100 items.
+
+        Args:
+            major_only: If True, only return major market-moving news
+            hours_back: Number of hours to look back for news
+            max_pages: Maximum number of pages to fetch (safety limit)
+
+        Returns:
+            List of news headline dictionaries with:
+                - headline: The news headline text
+                - source: News source (e.g., Reuters, Bloomberg)
+                - tickers: List of related ticker symbols
+                - is_major: Boolean indicating if this is major news
+                - sentiment: Sentiment classification (positive, negative, neutral)
+                - created_at: ISO 8601 timestamp when news was published
+                - tags: List of tags
+                - meta: Additional metadata
+        """
+        from datetime import datetime, timedelta
+
+        url = f"{self.BASE_URL}/api/news/headlines"
+        cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+        all_headlines = []
+        page = 1
+
+        while page <= max_pages:
+            params = {
+                "limit": 100,
+                "page": page
+            }
+
+            if major_only:
+                params["major_only"] = "true"
+
+            response = await self._request_with_retry("GET", url, params=params)
+            data = response.json()
+            headlines = data.get("data", [])
+
+            if not headlines:
+                # No more pages
+                logger.info(f"No more news items on page {page}, stopping pagination")
+                break
+
+            # Add all headlines from this page
+            all_headlines.extend(headlines)
+
+            # Check if the oldest item in this page is still within our time window
+            oldest_item = headlines[-1]  # Last item in page is oldest
+            created_at_str = oldest_item.get("created_at", "")
+
+            if created_at_str:
+                try:
+                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                    created_at = created_at.replace(tzinfo=None)
+
+                    if created_at < cutoff_time:
+                        # Oldest item is outside our time window, stop fetching
+                        logger.info(f"Reached news older than {hours_back} hours on page {page}, stopping pagination")
+                        break
+                except Exception as e:
+                    logger.warning(f"Could not parse timestamp for pagination check: {e}")
+
+            # Check if we got a full page (100 items)
+            if len(headlines) < 100:
+                # Partial page means no more items available
+                logger.info(f"Got partial page ({len(headlines)} items) on page {page}, stopping pagination")
+                break
+
+            logger.info(f"Fetched page {page} with {len(headlines)} items, continuing...")
+            page += 1
+
+        logger.info(f"Fetched {len(all_headlines)} total news headlines across {page} page(s) (major_only={major_only})")
+        return all_headlines
