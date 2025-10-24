@@ -59,14 +59,23 @@ class UnusualWhalesClient:
         """
         url = f"{self.BASE_URL}/api/stock/{ticker}/ohlc/{candle_size}"
 
-        # Calculate date range - include today to support realtime data during market hours
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days_back + 3)  # Add buffer for weekends
+        # For 4h and 1d candles, the API doesn't accept date range parameters (422 error - future date issue)
+        # and returns all available data automatically (~2500 candles max)
+        # For other candle sizes (1m, 5m, etc), we need to specify date range
+        if candle_size in ["4h", "1d"]:
+            # Don't send date parameters - API returns all available data
+            params = {}
+            logger.info(f"Fetching {candle_size} candles for {ticker} (no date params - API returns all available data)")
+        else:
+            # Calculate date range - include today to support realtime data during market hours
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back + 3)  # Add buffer for weekends
 
-        params = {
-            "start_date": start_date.strftime("%Y-%m-%d"),
-            "end_date": end_date.strftime("%Y-%m-%d")
-        }
+            params = {
+                "start_date": start_date.strftime("%Y-%m-%d"),
+                "end_date": end_date.strftime("%Y-%m-%d")
+            }
+            logger.info(f"Fetching {candle_size} candles for {ticker} from {params['start_date']} to {params['end_date']}")
 
         await self._rate_limit()
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -83,15 +92,28 @@ class UnusualWhalesClient:
             filtered_data = []
 
             for candle in all_data:
-                timestamp_str = candle.get("start_time") or candle.get("timestamp")
-                if timestamp_str:
+                # 1d candles use 'date' field (YYYY-MM-DD), intraday candles use 'start_time'/'timestamp'
+                date_str = candle.get("date")
+                if date_str:
+                    # Parse date for 1d candles (format: YYYY-MM-DD)
                     try:
-                        candle_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                        candle_time = datetime.strptime(date_str, "%Y-%m-%d")
                         if candle_time >= cutoff_time:
                             filtered_data.append(candle)
                     except:
                         # If we can't parse, include it to be safe
                         filtered_data.append(candle)
+                else:
+                    # Parse timestamp for intraday candles
+                    timestamp_str = candle.get("start_time") or candle.get("timestamp")
+                    if timestamp_str:
+                        try:
+                            candle_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            if candle_time >= cutoff_time:
+                                filtered_data.append(candle)
+                        except:
+                            # If we can't parse, include it to be safe
+                            filtered_data.append(candle)
 
             logger.info(f"Fetched {len(all_data)} OHLC candles, filtered to {len(filtered_data)} for last {days_back} days")
             return filtered_data
@@ -287,3 +309,33 @@ class UnusualWhalesClient:
         earnings = data.get("data", [])
         logger.info(f"Fetched {len(earnings)} earnings records for {ticker}")
         return earnings
+
+    async def get_expiry_breakdown(
+        self,
+        ticker: str,
+        date: Optional[str] = None
+    ) -> List[str]:
+        """Fetch all available option expiration dates for a ticker.
+
+        Args:
+            ticker: Stock symbol
+            date: Optional date in YYYY-MM-DD format (defaults to last trading date)
+
+        Returns:
+            List of expiration dates in YYYY-MM-DD format
+        """
+        url = f"{self.BASE_URL}/api/stock/{ticker}/expiry-breakdown"
+        params = {}
+        if date:
+            params["date"] = date
+
+        await self._rate_limit()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        # Extract expiry dates from response (API uses "expires" not "expiry")
+        expirations = [item.get("expires") for item in data.get("data", []) if item.get("expires")]
+        logger.info(f"Fetched {len(expirations)} available expirations for {ticker}")
+        return expirations

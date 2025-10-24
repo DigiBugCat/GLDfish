@@ -18,7 +18,8 @@ def create_iv_chart(
     ticker: str,
     expiration: str,
     option_type: str,
-    days: int = 2
+    days: int = 2,
+    earnings_dates: List[str] = None
 ) -> io.BytesIO:
     """Create a dual-axis chart with OHLC candles and IV line.
 
@@ -28,6 +29,7 @@ def create_iv_chart(
         expiration: Option expiration date
         option_type: "call" or "put"
         days: Number of trading days to chart (default: 2)
+        earnings_dates: Optional list of earnings report dates (YYYY-MM-DD format)
 
     Returns:
         BytesIO object containing the PNG chart
@@ -181,6 +183,59 @@ def create_iv_chart(
             x_pos = df.loc[day_change_idx, 'x_index']
             ax1.axvline(x=x_pos - 0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.5, zorder=1)
 
+    # Draw earnings date markers
+    if earnings_dates:
+        from datetime import datetime as dt
+
+        # Convert earnings dates to datetime for comparison
+        earnings_dt_list = []
+        for date_str in earnings_dates:
+            try:
+                earnings_dt_list.append(dt.strptime(date_str, "%Y-%m-%d").date())
+            except:
+                logger.warning(f"Could not parse earnings date: {date_str}")
+
+        # Find x_index positions for earnings dates that fall within chart range
+        for earnings_date in earnings_dt_list:
+            # Find rows matching this date
+            matching_rows = df[df['date_pt'] == earnings_date]
+
+            if not matching_rows.empty:
+                # Use the first candle of the earnings day (or middle if multiple)
+                if len(matching_rows) > 1:
+                    # Use middle candle for better visual placement
+                    x_pos = matching_rows.iloc[len(matching_rows) // 2]['x_index']
+                else:
+                    x_pos = matching_rows.iloc[0]['x_index']
+
+                # Draw vertical line for earnings
+                ax1.axvline(
+                    x=x_pos,
+                    color='#9c27b0',  # Purple/magenta color
+                    linestyle='--',
+                    linewidth=2.5,
+                    alpha=0.8,
+                    zorder=5,
+                    label='Earnings' if earnings_date == earnings_dt_list[0] else ""  # Only label first one
+                )
+
+                # Add small text annotation above the line
+                y_pos = ax1.get_ylim()[1] * 0.98  # Near top of chart
+                ax1.text(
+                    x_pos,
+                    y_pos,
+                    'E',
+                    ha='center',
+                    va='top',
+                    fontsize=10,
+                    fontweight='bold',
+                    color='#9c27b0',
+                    bbox=dict(boxstyle='circle,pad=0.3', facecolor='white', edgecolor='#9c27b0', linewidth=1.5),
+                    zorder=6
+                )
+
+                logger.info(f"Added earnings marker for {earnings_date} at x_index {x_pos}")
+
     # Set X-axis limits
     ax1.set_xlim(-1, len(df))
 
@@ -191,10 +246,16 @@ def create_iv_chart(
     title = f"{ticker} - {option_type.capitalize()} Options IV (Exp: {expiration})"
     plt.title(title, fontsize=16, fontweight="bold", pad=20)
 
-    # Legends
+    # Legends - combine legends from both axes
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines2, labels2, loc="upper right", fontsize=11, framealpha=0.9)
+
+    # Combine legends from both axes
+    all_lines = lines1 + lines2
+    all_labels = labels1 + labels2
+
+    if all_lines:
+        ax2.legend(all_lines, all_labels, loc="upper right", fontsize=11, framealpha=0.9)
 
     # Tight layout
     plt.tight_layout()
@@ -285,4 +346,186 @@ def create_error_chart(error_message: str) -> io.BytesIO:
     buf.seek(0)
     plt.close(fig)
 
+    return buf
+
+
+def plot_earnings_candlesticks(ax, ohlc_data: List[Dict[str, Any]], ticker: str):
+    """Plot candlesticks for earnings analysis chart.
+
+    Args:
+        ax: Matplotlib axis (secondary axis for price)
+        ohlc_data: List of dicts with 'day', 'open', 'high', 'low', 'close'
+        ticker: Stock ticker symbol for labeling
+    """
+    width = 0.6  # Candlestick width
+
+    for candle in ohlc_data:
+        x_pos = candle['day']
+        open_price = candle['open']
+        high_price = candle['high']
+        low_price = candle['low']
+        close_price = candle['close']
+
+        # Determine color
+        color = '#26a69a' if close_price >= open_price else '#ef5350'
+
+        # Draw high-low line
+        ax.plot(
+            [x_pos, x_pos],
+            [low_price, high_price],
+            color=color,
+            linewidth=1.5,
+            solid_capstyle='round',
+            zorder=1,
+            alpha=0.8
+        )
+
+        # Draw open-close rectangle
+        body_height = abs(close_price - open_price)
+        body_bottom = min(open_price, close_price)
+
+        rect = Rectangle(
+            (x_pos - width / 2, body_bottom),
+            width,
+            body_height,
+            facecolor=color,
+            edgecolor=color,
+            alpha=0.7,
+            zorder=1
+        )
+        ax.add_patch(rect)
+
+
+def create_earnings_iv_chart(
+    earnings_iv_data: Dict[str, Any],
+    ticker: str
+) -> io.BytesIO:
+    """Create chart showing ATM IV behavior around earnings for different DTEs.
+
+    Args:
+        earnings_iv_data: Data structure from collect_earnings_iv_data()
+        ticker: Stock ticker symbol
+
+    Returns:
+        BytesIO object containing the PNG chart
+    """
+    earnings_dates = earnings_iv_data['earnings_dates']
+    data_by_earnings = earnings_iv_data['data']
+
+    # DTE colors
+    dte_colors = {
+        14: '#e74c3c',    # Red
+        30: '#f39c12',    # Orange
+        60: '#3498db',    # Blue
+        90: '#2ecc71',    # Green
+        180: '#9b59b6'    # Purple
+    }
+
+    dte_labels = {
+        14: '14 DTE',
+        30: '30 DTE',
+        60: '60 DTE',
+        90: '90 DTE',
+        180: '180 DTE'
+    }
+
+    # Create subplots for each earnings event
+    num_earnings = len(earnings_dates)
+    fig, axes = plt.subplots(num_earnings, 1, figsize=(14, 5 * num_earnings), sharex=True)
+
+    # Handle single subplot case
+    if num_earnings == 1:
+        axes = [axes]
+
+    for idx, (earnings_date_str, ax) in enumerate(zip(earnings_dates, axes)):
+        earnings_data_points = data_by_earnings[earnings_date_str]
+
+        if not earnings_data_points:
+            ax.text(0.5, 0.5, f"No data available for {earnings_date_str}",
+                    ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f"Earnings: {earnings_date_str}")
+            continue
+
+        # Create secondary axis for price
+        ax2 = ax.twinx()
+
+        # Organize data by DTE and collect OHLC data
+        dte_series = {dte: {'days': [], 'ivs': []} for dte in [14, 30, 60, 90, 180]}
+        ohlc_data = []
+
+        for day_offset, day_data in sorted(earnings_data_points.items()):
+            # Extract IV data
+            dte_ivs = day_data.get('ivs', {})
+            for dte, iv_value in dte_ivs.items():
+                dte_series[dte]['days'].append(day_offset)
+                dte_series[dte]['ivs'].append(iv_value)
+
+            # Extract OHLC data for candlesticks
+            ohlc = day_data.get('ohlc')
+            if ohlc:
+                ohlc_data.append({
+                    'day': day_offset,
+                    'open': ohlc['open'],
+                    'high': ohlc['high'],
+                    'low': ohlc['low'],
+                    'close': ohlc['close']
+                })
+
+        # Plot candlesticks on secondary axis (first, so they appear behind IV lines)
+        if ohlc_data:
+            plot_earnings_candlesticks(ax2, ohlc_data, ticker)
+
+
+        # Plot each DTE series on primary axis
+        for dte in [14, 30, 60, 90, 180]:
+            if dte_series[dte]['days']:
+                ax.plot(
+                    dte_series[dte]['days'],
+                    dte_series[dte]['ivs'],
+                    marker='o',
+                    markersize=6,
+                    linewidth=2.5,
+                    color=dte_colors[dte],
+                    label=dte_labels[dte],
+                    alpha=0.9,
+                    zorder=2
+                )
+
+        # Add vertical line at earnings date (day 0)
+        ax.axvline(x=0, color='black', linestyle='--', linewidth=2, alpha=0.7, label='Earnings Date', zorder=3)
+
+        # Formatting for primary axis (IV)
+        ax.set_ylabel("ATM IV (%)", fontsize=12, fontweight='bold', color='black')
+        ax.tick_params(axis='y', labelcolor='black')
+
+        # Formatting for secondary axis (Price)
+        ax2.set_ylabel(f"{ticker} Price ($)", fontsize=12, fontweight='bold', color='#95a5a6')
+        ax2.tick_params(axis='y', labelcolor='#95a5a6')
+
+        ax.set_title(f"Earnings: {earnings_date_str}", fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3, linestyle='--', zorder=0)
+
+        # Combine legends from both axes
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc='best', fontsize=10, framealpha=0.9)
+
+        # Set x-axis to show all days
+        if earnings_data_points:
+            all_days = sorted(set(day for day in earnings_data_points.keys()))
+            ax.set_xticks(all_days)
+            ax.set_xlabel("Days from Earnings", fontsize=12, fontweight='bold')
+
+    # Overall title
+    fig.suptitle(f"{ticker} - ATM IV Around Earnings", fontsize=16, fontweight='bold', y=0.995)
+
+    plt.tight_layout()
+
+    # Save to BytesIO
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=200, bbox_inches="tight", facecolor='white')
+    buf.seek(0)
+    plt.close(fig)
+
+    logger.info(f"Generated earnings IV chart for {ticker}")
     return buf

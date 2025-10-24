@@ -18,9 +18,10 @@ from .utils import (
     identify_required_strikes_by_date,
     align_data_by_timestamp,
     align_historic_data,
-    get_trading_dates
+    get_trading_dates,
+    collect_earnings_iv_data
 )
-from .chart_generator import create_iv_chart, create_error_chart
+from .chart_generator import create_iv_chart, create_error_chart, create_earnings_iv_chart
 from .database import ChartDatabase
 
 # Load environment variables
@@ -155,13 +156,55 @@ class ChartControlView(View):
                 await interaction.followup.send("❌ Could not refresh: Data alignment failed", ephemeral=True)
                 return
 
+            # Fetch earnings dates (optional - don't fail if unavailable)
+            earnings_dates = []
+            try:
+                earnings_data = await self.bot.uw_client.get_earnings(self.ticker)
+                if earnings_data and ohlc_data:
+                    # Extract report dates that fall within ACTUAL OHLC data range
+                    from datetime import datetime as dt
+
+                    # Get actual date range from OHLC data
+                    ohlc_timestamps = []
+                    for candle in ohlc_data:
+                        timestamp_str = candle.get("start_time") or candle.get("timestamp")
+                        if timestamp_str:
+                            try:
+                                ts = dt.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                ohlc_timestamps.append(ts)
+                            except:
+                                continue
+
+                    if ohlc_timestamps:
+                        chart_start = min(ohlc_timestamps).replace(tzinfo=None)
+                        chart_end = max(ohlc_timestamps).replace(tzinfo=None)
+
+                        logger.info(f"Refresh - Chart date range: {chart_start.date()} to {chart_end.date()}")
+
+                        for event in earnings_data:
+                            report_date_str = event.get("report_date")
+                            if report_date_str:
+                                try:
+                                    report_date = dt.strptime(report_date_str, "%Y-%m-%d")
+                                    # Only include earnings within actual chart range
+                                    if chart_start <= report_date <= chart_end:
+                                        earnings_dates.append(report_date_str)
+                                except:
+                                    continue
+
+                        if earnings_dates:
+                            logger.info(f"Found {len(earnings_dates)} earnings dates for refresh: {earnings_dates}")
+            except Exception as e:
+                logger.warning(f"Could not fetch earnings data for refresh: {e}")
+
             # Generate new chart
             chart_buffer = create_iv_chart(
                 data=aligned_data,
                 ticker=self.ticker,
                 expiration=self.expiration,
                 option_type=self.option_type,
-                days=self.days
+                days=self.days,
+                earnings_dates=earnings_dates if earnings_dates else None
             )
 
             # Edit message with new chart
@@ -502,7 +545,48 @@ async def iv_chart(
             )
             return
 
-        # Step 7: Generate chart
+        # Step 7: Fetch earnings dates (optional - don't fail if unavailable)
+        earnings_dates = []
+        try:
+            earnings_data = await bot.uw_client.get_earnings(ticker)
+            if earnings_data and ohlc_data:
+                # Extract report dates that fall within ACTUAL OHLC data range
+                from datetime import datetime as dt
+
+                # Get actual date range from OHLC data
+                ohlc_timestamps = []
+                for candle in ohlc_data:
+                    timestamp_str = candle.get("start_time") or candle.get("timestamp")
+                    if timestamp_str:
+                        try:
+                            ts = dt.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            ohlc_timestamps.append(ts)
+                        except:
+                            continue
+
+                if ohlc_timestamps:
+                    chart_start = min(ohlc_timestamps).replace(tzinfo=None)
+                    chart_end = max(ohlc_timestamps).replace(tzinfo=None)
+
+                    logger.info(f"Chart date range: {chart_start.date()} to {chart_end.date()}")
+
+                    for event in earnings_data:
+                        report_date_str = event.get("report_date")
+                        if report_date_str:
+                            try:
+                                report_date = dt.strptime(report_date_str, "%Y-%m-%d")
+                                # Only include earnings within actual chart range
+                                if chart_start <= report_date <= chart_end:
+                                    earnings_dates.append(report_date_str)
+                            except:
+                                continue
+
+                    if earnings_dates:
+                        logger.info(f"Found {len(earnings_dates)} earnings dates within chart range: {earnings_dates}")
+        except Exception as e:
+            logger.warning(f"Could not fetch earnings data for {ticker}: {e}")
+
+        # Step 8: Generate chart
         await interaction.edit_original_response(
             content="Generating chart..."
         )
@@ -512,7 +596,8 @@ async def iv_chart(
             ticker=ticker,
             expiration=expiration_formatted,
             option_type=option_type_str,
-            days=days
+            days=days,
+            earnings_dates=earnings_dates if earnings_dates else None
         )
 
         # Create view with buttons for refresh and delete
@@ -685,6 +770,107 @@ async def earnings(
         logger.error(f"Error fetching earnings: {e}", exc_info=True)
         await interaction.edit_original_response(
             content=f"❌ Error fetching earnings data: {str(e)}"
+        )
+
+
+@bot.tree.command(
+    name="earnings_iv",
+    description="Analyze how ATM IV behaves around earnings for different DTE buckets (14D/30D/60D/90D/180D)"
+)
+@app_commands.describe(
+    ticker="Stock ticker symbol (e.g., NVDA, AAPL)",
+    option_type="Type of options to analyze (call=default, put, or both)"
+)
+@app_commands.choices(option_type=[
+    app_commands.Choice(name="Call (default)", value="call"),
+    app_commands.Choice(name="Put", value="put"),
+    app_commands.Choice(name="Both", value="both")
+])
+@is_dm_whitelisted()
+async def earnings_iv(
+    interaction: discord.Interaction,
+    ticker: str,
+    option_type: app_commands.Choice[str] = None
+):
+    """Analyze ATM IV behavior around earnings command handler."""
+    await interaction.response.defer()
+
+    try:
+        ticker = ticker.upper()
+
+        # Extract option_type value (default to "call")
+        opt_type = option_type.value if option_type else "call"
+
+        logger.info(f"Processing earnings IV analysis request for {ticker}, option_type={opt_type}")
+
+        # Step 1: Collect earnings IV data
+        await interaction.edit_original_response(
+            content=f"🔍 Fetching earnings dates for {ticker}..."
+        )
+
+        await interaction.edit_original_response(
+            content=f"📊 Analyzing ATM {opt_type.upper()} IV around last 3 earnings for {ticker}...\n"
+                    f"This may take a few minutes (fetching historic IV data)..."
+        )
+
+        try:
+            earnings_iv_data = await collect_earnings_iv_data(
+                client=bot.uw_client,
+                ticker=ticker,
+                num_earnings=3,
+                days_window=7,
+                option_type=opt_type
+            )
+        except ValueError as e:
+            await interaction.edit_original_response(
+                content=f"❌ {str(e)}"
+            )
+            return
+
+        # Check if we got any data
+        if not earnings_iv_data['data'] or all(not v for v in earnings_iv_data['data'].values()):
+            await interaction.edit_original_response(
+                content=f"❌ No IV data available for {ticker} around recent earnings dates. "
+                        f"This could mean:\n"
+                        f"• Options didn't exist far enough back\n"
+                        f"• Recent earnings are too recent (need historical data)\n"
+                        f"• Try a more liquid ticker with longer option history"
+            )
+            return
+
+        # Step 2: Generate chart
+        await interaction.edit_original_response(
+            content=f"📈 Generating earnings IV chart for {ticker}..."
+        )
+
+        chart_buffer = create_earnings_iv_chart(
+            earnings_iv_data=earnings_iv_data,
+            ticker=ticker
+        )
+
+        # Step 3: Send chart
+        file = discord.File(chart_buffer, filename="earnings_iv_chart.png")
+
+        earnings_dates_str = ", ".join(earnings_iv_data['earnings_dates'])
+        await interaction.edit_original_response(
+            content=f"**{ticker} - ATM IV Around Earnings**\n"
+                    f"Analyzed earnings: {earnings_dates_str}\n"
+                    f"Shows how IV for different expiration windows (14D/30D/60D/90D/180D) "
+                    f"changes in the week before and after earnings.",
+            attachments=[file]
+        )
+
+        logger.info(f"Successfully generated earnings IV chart for {ticker}")
+
+    except Exception as e:
+        logger.error(f"Error generating earnings IV chart: {e}", exc_info=True)
+
+        # Send error chart
+        error_buffer = create_error_chart(str(e))
+        file = discord.File(error_buffer, filename="error.png")
+        await interaction.edit_original_response(
+            content="❌ An error occurred while generating the earnings IV chart:",
+            attachments=[file]
         )
 
 
