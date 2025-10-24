@@ -1624,14 +1624,14 @@ async def eight_ball(
 
         logger.info(f"Processing 8ball prophecy request: question='{question or 'none'}'")
 
-        # Fetch major news headlines from last 8 hours
+        # Fetch recent news headlines from last 8 hours
         await interaction.edit_original_response(
             content="🔮 The oracle peers into the market's soul..."
         )
 
         news_items = await bot.uw_client.get_news_headlines(
-            major_only=True,  # Only major news for prophecies
-            hours_back=8      # Last 8 hours
+            major_only=False,  # All news - fresh news often isn't flagged as major
+            hours_back=8       # Last 8 hours
         )
 
         if not news_items:
@@ -1678,7 +1678,7 @@ async def eight_ball(
 
         embed.add_field(
             name="Divination Source",
-            value=f"Last 8 hours of major market events",
+            value=f"Last 8 hours of market events",
             inline=True
         )
 

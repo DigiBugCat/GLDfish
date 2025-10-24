@@ -422,10 +422,15 @@ class UnusualWhalesClient:
         page = 1
 
         while page <= max_pages:
-            params = {
-                "limit": 100,
-                "page": page
-            }
+            params = {}
+
+            # IMPORTANT: Don't pass 'page' param for first page - it returns stale data!
+            # Only pass page param for page 2+
+            if page > 1:
+                params["page"] = page
+
+            # Don't pass limit param - API returns fresh data with default limit
+            # Passing limit=100 causes stale/cached results
 
             if major_only:
                 params["major_only"] = "true"
@@ -458,8 +463,8 @@ class UnusualWhalesClient:
                 except Exception as e:
                     logger.warning(f"Could not parse timestamp for pagination check: {e}")
 
-            # Check if we got a full page (100 items)
-            if len(headlines) < 100:
+            # Check if we got a full page (default limit is 50 items)
+            if len(headlines) < 50:
                 # Partial page means no more items available
                 logger.info(f"Got partial page ({len(headlines)} items) on page {page}, stopping pagination")
                 break
