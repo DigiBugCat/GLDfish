@@ -188,19 +188,20 @@ class OpenRouterClient:
         """
         query_text = user_query if user_query else "What's happening in the market right now?"
 
-        prompt = f"""You are a financial market analyst. Analyze these recent market news headlines and provide a concise, insightful summary.
+        prompt = f"""You are a financial news analyst. Your job is to summarize what's actually in the headlines, not add speculation.
 
 User Question: {query_text}
 
 News Headlines (last {hours} hours):
 {formatted_news}
 
-Provide a clear, actionable summary that:
-1. Identifies key market themes and events
-2. Explains notable price movements and their causes
-3. Provides relevant context and implications
-4. Directly answers the user's specific question if provided
+Instructions:
+1. Report what's ACTUALLY in the headlines - stick to the facts
+2. Answer the user's question directly using only information from the news
+3. If making connections between events, clearly state "This connection might suggest..." or "These events could be related because..."
+4. Avoid speculative language like "typically", "usually", "may indicate" unless you're explicitly noting a potential connection
+5. Focus on: What happened? What do the headlines say? What connections exist between the events?
 
-Keep it concise (2-3 paragraphs max), professional, and focused on what matters most to traders and investors."""
+Keep it factual, direct, and concise (2-3 paragraphs max). Report the news, don't interpret beyond what's explicitly stated."""
 
         return prompt
