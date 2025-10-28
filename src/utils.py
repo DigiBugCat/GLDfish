@@ -810,11 +810,12 @@ async def collect_earnings_iv_data(
     # DTE buckets to analyze
     dte_buckets = [14, 30, 60, 90, 180]
 
-    # Step 4: For each earnings date, collect IV data
-    results = {
-        'earnings_dates': past_earnings,
-        'data': {}
-    }
+    # Step 4: PHASE 1 - Collect all contract IDs we need to fetch
+    logger.info("PHASE 1: Collecting all contract IDs to fetch...")
+    contracts_to_fetch = set()  # Use set to avoid duplicates
+
+    # Track metadata for each contract to help with processing later
+    contract_metadata = {}  # contract_id -> list of (earnings_date_str, day_offset, analysis_date_str, target_dte, spot_price)
 
     for earnings_date_str in past_earnings:
         logger.info(f"Processing earnings date: {earnings_date_str}")
@@ -858,8 +859,6 @@ async def collect_earnings_iv_data(
             # Will try current chains first in the date loop
             logger.info(f"Earnings is {earnings_age_days} days old, using CURRENT CHAINS mode")
 
-        earnings_data_points = {}
-
         # Generate date range: ±days_window around earnings
         for day_offset in range(-days_window, days_window + 1):
             analysis_date = earnings_date + timedelta(days=day_offset)
@@ -877,17 +876,12 @@ async def collect_earnings_iv_data(
 
             spot_price = ohlc['close']
 
-            # For each DTE bucket, find IV data using appropriate strategy
-            dte_ivs = {}
-
+            # For each DTE bucket, collect contract IDs
             for target_dte in dte_buckets:
-                iv_value = None
-
                 if use_discovery:
                     # DISCOVERY MODE: Use pre-discovered contracts
                     discovered_info = discovered_contracts.get(target_dte) if discovered_contracts else None
                     if not discovered_info:
-                        # No contract found during discovery phase
                         continue
 
                     exp_date, opt_type_name = discovered_info
@@ -895,37 +889,30 @@ async def collect_earnings_iv_data(
                     # Find ATM strike for current spot price
                     strikes = generate_smart_strikes(spot_price, max_strikes=6)
 
-                    # Try each strike to find one with IV data
+                    # Collect contract IDs for each strike
                     for strike in strikes:
                         opt_type_code = 'C' if opt_type_name == 'call' else 'P'
                         exp_str = exp_date.strftime("%y%m%d")
                         strike_code = f"{int(strike * 1000):08d}"
                         contract_id = f"{ticker}{exp_str}{opt_type_code}{strike_code}"
 
-                        try:
-                            historic_records = await client.get_option_historic(contract_id)
+                        contracts_to_fetch.add(contract_id)
 
-                            # Find IV for this specific analysis date
-                            for record in historic_records:
-                                if record.get('date') == analysis_date_str:
-                                    iv_str = record.get('implied_volatility')
-                                    if iv_str:
-                                        try:
-                                            iv_value = float(iv_str) * 100
-                                            dte_ivs[target_dte] = iv_value
-                                            logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% (discovery, strike=${strike})")
-                                            break
-                                        except:
-                                            pass
-
-                            if iv_value is not None:
-                                break
-
-                        except Exception as e:
-                            continue
+                        # Store metadata
+                        if contract_id not in contract_metadata:
+                            contract_metadata[contract_id] = []
+                        contract_metadata[contract_id].append({
+                            'earnings_date_str': earnings_date_str,
+                            'day_offset': day_offset,
+                            'analysis_date_str': analysis_date_str,
+                            'target_dte': target_dte,
+                            'spot_price': spot_price,
+                            'strike': strike,
+                            'mode': 'discovery'
+                        })
 
                 else:
-                    # CURRENT CHAINS MODE: Try current chains first
+                    # CURRENT CHAINS MODE: Collect contracts from current chains
                     target_exp_date = analysis_date + timedelta(days=target_dte)
 
                     # Find contracts with expiration close to target (±3 days tolerance)
@@ -941,34 +928,121 @@ async def collect_earnings_iv_data(
                         # Sort by expiration match quality
                         candidate_contracts.sort(key=lambda x: x[2])
 
-                        # Find ATM strike among candidates
+                        # Collect ATM strike candidates
                         for contract_id, parsed, _ in candidate_contracts:
                             strike = parsed['strike']
                             strike_diff = abs(strike - spot_price)
 
                             # Only consider strikes within ±10% of spot
                             if strike_diff / spot_price <= 0.10:
-                                try:
-                                    historic_records = await client.get_option_historic(contract_id)
+                                contracts_to_fetch.add(contract_id)
 
-                                    # Find IV for this specific analysis date
-                                    for record in historic_records:
-                                        if record.get('date') == analysis_date_str:
-                                            iv_str = record.get('implied_volatility')
-                                            if iv_str:
-                                                try:
-                                                    iv_value = float(iv_str) * 100
-                                                    dte_ivs[target_dte] = iv_value
-                                                    logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% (current chains, strike=${strike})")
-                                                    break
-                                                except:
-                                                    pass
+                                # Store metadata
+                                if contract_id not in contract_metadata:
+                                    contract_metadata[contract_id] = []
+                                contract_metadata[contract_id].append({
+                                    'earnings_date_str': earnings_date_str,
+                                    'day_offset': day_offset,
+                                    'analysis_date_str': analysis_date_str,
+                                    'target_dte': target_dte,
+                                    'spot_price': spot_price,
+                                    'strike': strike,
+                                    'mode': 'current_chains'
+                                })
 
-                                    if iv_value is not None:
-                                        break
+    logger.info(f"PHASE 1 complete: Collected {len(contracts_to_fetch)} unique contracts to fetch")
 
-                                except Exception as e:
-                                    continue
+    # Step 5: PHASE 2 - Fetch all contracts concurrently
+    logger.info("PHASE 2: Fetching all contract historic data concurrently...")
+
+    async def fetch_contract(contract_id: str):
+        """Helper to fetch a single contract's historic data."""
+        try:
+            historic_records = await client.get_option_historic(contract_id)
+            return (contract_id, historic_records)
+        except Exception as e:
+            logger.debug(f"Failed to fetch {contract_id}: {e}")
+            return (contract_id, None)
+
+    # Fetch all contracts concurrently
+    fetch_tasks = [fetch_contract(cid) for cid in contracts_to_fetch]
+    fetch_results = await asyncio.gather(*fetch_tasks)
+
+    # Build cache: contract_id -> historic_records
+    historic_cache = {}
+    for contract_id, records in fetch_results:
+        if records is not None:
+            historic_cache[contract_id] = records
+
+    logger.info(f"PHASE 2 complete: Successfully fetched {len(historic_cache)}/{len(contracts_to_fetch)} contracts")
+
+    # Step 6: PHASE 3 - Process cached data to build results
+    logger.info("PHASE 3: Processing cached data to build results...")
+    results = {
+        'earnings_dates': past_earnings,
+        'data': {}
+    }
+
+    # Process each earnings period
+    for earnings_date_str in past_earnings:
+        earnings_date = datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+        earnings_data_points = {}
+
+        # Generate date range: ±days_window around earnings
+        for day_offset in range(-days_window, days_window + 1):
+            analysis_date = earnings_date + timedelta(days=day_offset)
+            analysis_date_str = analysis_date.strftime("%Y-%m-%d")
+
+            # Skip weekends
+            if analysis_date.weekday() >= 5:
+                continue
+
+            # Get OHLC data for this date
+            ohlc = ohlc_by_date.get(analysis_date_str)
+            if not ohlc:
+                continue
+
+            spot_price = ohlc['close']
+
+            # For each DTE bucket, find IV data from cached results
+            dte_ivs = {}
+
+            for target_dte in dte_buckets:
+                iv_value = None
+
+                # Find contracts that match this (earnings_date, day_offset, target_dte)
+                # We'll check all contracts in our metadata
+                for contract_id, metadata_list in contract_metadata.items():
+                    for metadata in metadata_list:
+                        if (metadata['earnings_date_str'] == earnings_date_str and
+                            metadata['day_offset'] == day_offset and
+                            metadata['target_dte'] == target_dte):
+
+                            # Get historic records from cache
+                            historic_records = historic_cache.get(contract_id)
+                            if not historic_records:
+                                continue
+
+                            # Find IV for this specific analysis date
+                            for record in historic_records:
+                                if record.get('date') == analysis_date_str:
+                                    iv_str = record.get('implied_volatility')
+                                    if iv_str:
+                                        try:
+                                            iv_value = float(iv_str) * 100
+                                            dte_ivs[target_dte] = iv_value
+                                            strike = metadata['strike']
+                                            mode = metadata['mode']
+                                            logger.debug(f"  {analysis_date_str} DTE{target_dte}: {iv_value:.1f}% ({mode}, strike=${strike})")
+                                            break
+                                        except:
+                                            pass
+
+                            if iv_value is not None:
+                                break
+
+                    if iv_value is not None:
+                        break
 
                 if iv_value is None:
                     logger.debug(f"  {analysis_date_str} DTE{target_dte}: No IV data found")
@@ -978,10 +1052,12 @@ async def collect_earnings_iv_data(
                 earnings_data_points[day_offset] = {
                     'ivs': dte_ivs,
                     'ohlc': ohlc,
-                    'spot_price': spot_price  # Keep for backward compatibility
+                    'spot_price': spot_price
                 }
 
         results['data'][earnings_date_str] = earnings_data_points
         logger.info(f"Collected {len(earnings_data_points)} data points for {earnings_date_str}")
+
+    logger.info("PHASE 3 complete: Results processing finished")
 
     return results
