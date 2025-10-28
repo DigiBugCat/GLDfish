@@ -630,6 +630,29 @@ async def discover_contracts_for_period(
     reference_date = datetime.strptime(reference_date_str, "%Y-%m-%d").date()
     discovered = {}
 
+    # Helper function to test a single expiration/option_type combination
+    async def test_expiration(target_dte: int, exp_date: date, opt_type_code: str, test_strike: float):
+        """Test if a specific expiration has historic data for the reference date."""
+        exp_str = exp_date.strftime("%y%m%d")
+        strike_code = f"{int(test_strike * 1000):08d}"
+        contract_id = f"{ticker}{exp_str}{opt_type_code}{strike_code}"
+
+        try:
+            historic_records = await client.get_option_historic(contract_id)
+
+            # Check if this contract has data for our reference date
+            has_data = any(record.get('date') == reference_date_str for record in historic_records)
+
+            if has_data:
+                opt_type_name = "call" if opt_type_code == 'C' else "put"
+                return (target_dte, exp_date, opt_type_name)
+            else:
+                return None
+        except:
+            return None
+
+    # Build all test tasks for concurrent execution
+    test_tasks = []
     for target_dte in dte_buckets:
         target_exp_date = reference_date + timedelta(days=target_dte)
 
@@ -646,42 +669,32 @@ async def discover_contracts_for_period(
 
         # Generate smart strikes
         strikes = generate_smart_strikes(spot_price, max_strikes=6)
+        test_strike = strikes[0]  # Use first strike for testing
 
-        # Try each expiration until we find one with data
-        found = False
-        for i, exp_date in enumerate(expirations_to_try):
-            # Add small delay between expiration attempts to avoid rate limiting
-            if i > 0:
-                await asyncio.sleep(0.3)
-
-            # Try first strike only to check if this expiration has historic data
-            test_strike = strikes[0]
+        # Create tasks for all (expiration × option_type) combinations
+        for exp_date in expirations_to_try:
             for opt_type_code in option_types:
-                exp_str = exp_date.strftime("%y%m%d")
-                strike_code = f"{int(test_strike * 1000):08d}"
-                contract_id = f"{ticker}{exp_str}{opt_type_code}{strike_code}"
+                test_tasks.append(test_expiration(target_dte, exp_date, opt_type_code, test_strike))
 
-                try:
-                    historic_records = await client.get_option_historic(contract_id)
+    # Execute all tests concurrently
+    if logger:
+        logger.info(f"  Testing {len(test_tasks)} expiration combinations concurrently...")
 
-                    # Check if this contract has data for our reference date
-                    has_data = any(record.get('date') == reference_date_str for record in historic_records)
+    results = await asyncio.gather(*test_tasks)
 
-                    if has_data:
-                        # This expiration works! Store it
-                        opt_type_name = "call" if opt_type_code == 'C' else "put"
-                        discovered[target_dte] = (exp_date, opt_type_name)
-                        found = True
-                        if logger:
-                            logger.info(f"  DTE {target_dte}: Using exp={exp_date} (verified historic data)")
-                        break
-                except:
-                    continue
+    # Process results - pick first successful match for each DTE
+    for result in results:
+        if result is not None:
+            target_dte, exp_date, opt_type_name = result
+            # Only store if we haven't found one for this DTE yet
+            if target_dte not in discovered:
+                discovered[target_dte] = (exp_date, opt_type_name)
+                if logger:
+                    logger.info(f"  DTE {target_dte}: Using exp={exp_date} (verified historic data)")
 
-            if found:
-                break
-
-        if not found:
+    # Mark any DTEs we didn't find
+    for target_dte in dte_buckets:
+        if target_dte not in discovered:
             if logger:
                 logger.warning(f"  DTE {target_dte}: No contracts found with historic data for {reference_date_str}")
             discovered[target_dte] = None

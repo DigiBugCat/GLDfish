@@ -17,7 +17,7 @@ class UnusualWhalesClient:
     # Rate limiting: delay between requests (in seconds)
     REQUEST_DELAY = 0.15  # 150ms between requests to avoid rate limits
     # Concurrency limit: maximum number of simultaneous requests
-    MAX_CONCURRENT_REQUESTS = 4  # Limit to 4 concurrent requests to avoid overwhelming API
+    MAX_CONCURRENT_REQUESTS = 8  # Increased from 4 to 8 for better throughput (monitor for 429 errors)
 
     def __init__(self, api_key: str):
         """Initialize the API client.
@@ -30,20 +30,39 @@ class UnusualWhalesClient:
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json"
         }
-        self._last_request_time = 0.0
         # Semaphore to limit concurrent requests
         self._semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
+        # Sliding window rate limiter: track request timestamps
+        self._request_times = []
+        self._rate_limit_lock = asyncio.Lock()
+        # Calculate max requests per second based on REQUEST_DELAY
+        # REQUEST_DELAY of 0.15s = ~6.67 requests/second
+        self._max_requests_per_second = 1.0 / self.REQUEST_DELAY
 
     async def _rate_limit(self):
-        """Apply rate limiting between API requests."""
-        current_time = time.time()
-        time_since_last_request = current_time - self._last_request_time
+        """Apply sliding window rate limiting between API requests.
 
-        if time_since_last_request < self.REQUEST_DELAY:
-            delay = self.REQUEST_DELAY - time_since_last_request
-            await asyncio.sleep(delay)
+        This allows bursting up to the limit, then throttles when limit is reached.
+        More efficient than fixed delays between requests.
+        """
+        async with self._rate_limit_lock:
+            now = time.time()
 
-        self._last_request_time = time.time()
+            # Remove request times older than 1 second (sliding window)
+            self._request_times = [t for t in self._request_times if now - t < 1.0]
+
+            # If we've hit the rate limit, wait until oldest request expires
+            if len(self._request_times) >= self._max_requests_per_second:
+                oldest_request = self._request_times[0]
+                sleep_time = 1.0 - (now - oldest_request)
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                    # Clean up again after sleeping
+                    now = time.time()
+                    self._request_times = [t for t in self._request_times if now - t < 1.0]
+
+            # Record this request
+            self._request_times.append(time.time())
 
     async def _request_with_retry(
         self,
