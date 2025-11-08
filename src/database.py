@@ -32,13 +32,46 @@ class ChartDatabase:
                     channel_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
                     ticker TEXT NOT NULL,
-                    expiration TEXT NOT NULL,
+                    chart_type TEXT DEFAULT 'iv_chart',
+                    expiration TEXT,
+                    dte INTEGER,
                     option_type TEXT NOT NULL,
                     days INTEGER NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Migrate existing table if needed
+            self._migrate_schema()
+
             logger.info("Chart messages table ready")
+
+    def _migrate_schema(self):
+        """Migrate existing schema to support both IV charts and ATM premium charts."""
+        cursor = self.conn.execute("PRAGMA table_info(chart_messages)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        # Add chart_type column if missing
+        if 'chart_type' not in columns:
+            logger.info("Migrating schema: adding chart_type column")
+            self.conn.execute("""
+                ALTER TABLE chart_messages
+                ADD COLUMN chart_type TEXT DEFAULT 'iv_chart'
+            """)
+            # Set existing rows to 'iv_chart'
+            self.conn.execute("""
+                UPDATE chart_messages SET chart_type = 'iv_chart' WHERE chart_type IS NULL
+            """)
+
+        # Add dte column if missing
+        if 'dte' not in columns:
+            logger.info("Migrating schema: adding dte column")
+            self.conn.execute("""
+                ALTER TABLE chart_messages
+                ADD COLUMN dte INTEGER
+            """)
+
+        self.conn.commit()
 
     def store_chart(
         self,
@@ -46,9 +79,11 @@ class ChartDatabase:
         channel_id: int,
         user_id: int,
         ticker: str,
-        expiration: str,
         option_type: str,
-        days: int
+        days: int,
+        chart_type: str = 'iv_chart',
+        expiration: Optional[str] = None,
+        dte: Optional[int] = None
     ) -> bool:
         """Store chart message metadata.
 
@@ -57,9 +92,11 @@ class ChartDatabase:
             channel_id: Discord channel ID
             user_id: Discord user ID who requested
             ticker: Stock ticker
-            expiration: Option expiration date (YYYY-MM-DD)
             option_type: "call" or "put"
             days: Number of days of data
+            chart_type: Type of chart ('iv_chart' or 'atm_premium')
+            expiration: Option expiration date (YYYY-MM-DD) - for IV charts
+            dte: Days to expiration - for ATM premium charts
 
         Returns:
             True if successful
@@ -68,11 +105,11 @@ class ChartDatabase:
             with self.conn:
                 self.conn.execute("""
                     INSERT INTO chart_messages
-                    (message_id, channel_id, user_id, ticker, expiration, option_type, days)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (message_id, channel_id, user_id, ticker, expiration, option_type, days))
+                    (message_id, channel_id, user_id, ticker, chart_type, expiration, dte, option_type, days)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (message_id, channel_id, user_id, ticker, chart_type, expiration, dte, option_type, days))
 
-            logger.info(f"Stored chart message {message_id} for {ticker}")
+            logger.info(f"Stored {chart_type} message {message_id} for {ticker}")
             return True
         except Exception as e:
             logger.error(f"Failed to store chart message: {e}")
@@ -88,7 +125,7 @@ class ChartDatabase:
             Dictionary with chart metadata, or None if not found
         """
         cursor = self.conn.execute("""
-            SELECT message_id, channel_id, user_id, ticker, expiration, option_type, days, created_at
+            SELECT message_id, channel_id, user_id, ticker, chart_type, expiration, dte, option_type, days, created_at
             FROM chart_messages
             WHERE message_id = ?
         """, (message_id,))

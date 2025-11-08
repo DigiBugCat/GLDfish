@@ -529,3 +529,221 @@ def create_earnings_iv_chart(
 
     logger.info(f"Generated earnings IV chart for {ticker}")
     return buf
+
+
+def create_atm_premium_chart(
+    data: List[Dict[str, Any]],
+    ticker: str,
+    dte: int,
+    option_type: str,
+    days: int
+) -> io.BytesIO:
+    """Create a dual-axis chart with stock price and ATM option premium at constant DTE.
+
+    Args:
+        data: List of aligned data points from align_constant_dte_premium_data()
+        ticker: Stock ticker symbol
+        dte: Days to expiration being tracked
+        option_type: "call" or "put"
+        days: Number of trading days to chart
+
+    Returns:
+        BytesIO object containing the PNG chart
+    """
+    if not data:
+        raise ValueError("No data to plot")
+
+    # Convert to DataFrame
+    df = pd.DataFrame(data)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
+
+    # Filter to only regular market hours if market_time field exists
+    if 'market_time' in df.columns:
+        df = df[df['market_time'] == 'r'].copy()
+        logger.info(f"Filtered to {len(df)} regular market hour candles")
+
+    if df.empty:
+        raise ValueError("No data after filtering")
+
+    # Convert to PT for date filtering
+    if df['timestamp'].dt.tz is None:
+        df_pt = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('US/Pacific')
+    else:
+        df_pt = df['timestamp'].dt.tz_convert('US/Pacific')
+
+    # Get only the last N trading days
+    df['date'] = df_pt.dt.date
+    unique_dates = sorted(df['date'].unique(), reverse=True)
+
+    if len(unique_dates) > days:
+        last_n_dates = unique_dates[:days]
+        df = df[df['date'].isin(last_n_dates)].copy()
+        logger.info(f"Filtered to last {days} trading days: {last_n_dates}")
+    else:
+        logger.info(f"Showing all {len(unique_dates)} trading days available")
+
+    # Filter to rows with premium data
+    df_with_premium = df[df["option_premium"].notna()].copy()
+
+    if df_with_premium.empty:
+        raise ValueError("No option premium data available to plot")
+
+    # Create figure with dual axes
+    fig, ax1 = plt.subplots(figsize=(16, 9))
+    ax2 = ax1.twinx()
+
+    # Create a numerical index for X-axis to eliminate gaps
+    df['x_index'] = range(len(df))
+    df_with_premium = df_with_premium.merge(df[['timestamp', 'x_index']], on='timestamp', how='left')
+
+    # Plot stock price line on left axis
+    ax1.plot(
+        df["x_index"],
+        df["stock_price"],
+        color='#2196f3',  # Blue
+        linewidth=2.5,
+        label=f'{ticker} Stock Price',
+        alpha=0.9,
+        zorder=2
+    )
+    ax1.fill_between(
+        df["x_index"],
+        df["stock_price"],
+        alpha=0.1,
+        color='#2196f3'
+    )
+
+    # Plot option premium line on right axis
+    ax2.plot(
+        df_with_premium["x_index"],
+        df_with_premium["option_premium"],
+        color='#ff5722',  # Deep Orange
+        linewidth=2.5,
+        label=f'{dte} DTE ATM {option_type.capitalize()} Premium',
+        alpha=0.9,
+        zorder=2
+    )
+    ax2.fill_between(
+        df_with_premium["x_index"],
+        df_with_premium["option_premium"],
+        alpha=0.15,
+        color='#ff5722'
+    )
+
+    # Auto-scale axes with padding
+    stock_min = df["stock_price"].min()
+    stock_max = df["stock_price"].max()
+    stock_range = stock_max - stock_min
+    stock_padding = stock_range * 0.05
+    ax1.set_ylim(stock_min - stock_padding, stock_max + stock_padding)
+
+    premium_min = df_with_premium["option_premium"].min()
+    premium_max = df_with_premium["option_premium"].max()
+    premium_range = premium_max - premium_min
+    premium_padding = premium_range * 0.05
+    ax2.set_ylim(premium_min - premium_padding, premium_max + premium_padding)
+
+    # Formatting
+    ax1.set_xlabel("Time (PT)", fontsize=13, fontweight='bold')
+    ax1.set_ylabel("Stock Price ($)", fontsize=13, color='#2196f3', fontweight='bold')
+    ax2.set_ylabel(f"Option Premium ($)", fontsize=13, color='#ff5722', fontweight='bold')
+
+    ax1.tick_params(axis="y", labelcolor='#2196f3', labelsize=11)
+    ax2.tick_params(axis="y", labelcolor='#ff5722', labelsize=11)
+
+    # Format x-axis using custom labels at regular intervals
+    pt_tz = pytz.timezone('US/Pacific')
+    df['timestamp_pt'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pt_tz)
+
+    # Detect if we're in intraday or historic mode
+    if len(df) < 100:
+        # Historic mode: show labels every 5 data points
+        tick_interval = max(5, len(df) // 20)
+    else:
+        # Intraday mode: show labels every ~60 candles (roughly hourly)
+        tick_interval = 60
+
+    tick_positions = list(range(0, len(df), tick_interval))
+    if tick_positions and tick_positions[-1] != len(df) - 1:
+        tick_positions.append(len(df) - 1)
+
+    tick_labels = []
+    prev_date = None
+    for pos in tick_positions:
+        ts = df.iloc[pos]['timestamp_pt']
+        curr_date = ts.date()
+
+        # Show date on first tick or when date changes
+        if prev_date is None or curr_date != prev_date:
+            if len(df) < 100:
+                # Historic mode: show date only
+                tick_labels.append(ts.strftime('%m/%d'))
+            else:
+                # Intraday mode: show date and time
+                tick_labels.append(f"{ts.strftime('%m/%d')}\n{ts.strftime('%H:%M')}")
+        else:
+            if len(df) < 100:
+                tick_labels.append('')
+            else:
+                tick_labels.append(ts.strftime('%H:%M'))
+
+        prev_date = curr_date
+
+    ax1.set_xticks(tick_positions)
+    ax1.set_xticklabels(tick_labels, fontsize=10, ha="center")
+
+    # Add vertical lines to separate days (only for intraday mode)
+    df['date_pt'] = df['timestamp_pt'].dt.date
+    unique_dates_chart = df['date_pt'].unique()
+
+    if len(unique_dates_chart) > 1 and len(df) >= 100:
+        for i in range(1, len(unique_dates_chart)):
+            day_change_idx = df[df['date_pt'] == unique_dates_chart[i]].index[0]
+            x_pos = df.loc[day_change_idx, 'x_index']
+            ax1.axvline(x=x_pos - 0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.5, zorder=1)
+
+    # Set X-axis limits
+    ax1.set_xlim(-1, len(df))
+
+    # Grid
+    ax1.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+    # Title
+    title = f"{ticker} Stock Price vs {dte} DTE ATM {option_type.capitalize()} Premium"
+    plt.title(title, fontsize=16, fontweight="bold", pad=20)
+
+    # Legends - combine legends from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+
+    all_lines = lines1 + lines2
+    all_labels = labels1 + labels2
+
+    if all_lines:
+        ax1.legend(all_lines, all_labels, loc="upper left", fontsize=11, framealpha=0.9)
+
+    # Add data coverage info
+    valid_count = len(df_with_premium)
+    total_count = len(df)
+    coverage_pct = (valid_count / total_count * 100) if total_count > 0 else 0
+
+    # Add footnote with coverage stats
+    footnote = f"Data coverage: {valid_count}/{total_count} points ({coverage_pct:.1f}%)"
+    if df_with_premium['actual_dte'].notna().any():
+        avg_dte = df_with_premium['actual_dte'].mean()
+        footnote += f" | Avg DTE: {avg_dte:.1f} days"
+
+    fig.text(0.99, 0.01, footnote, ha='right', va='bottom', fontsize=9, color='gray', style='italic')
+
+    # Tight layout
+    plt.tight_layout()
+
+    # Save to BytesIO
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=200, bbox_inches="tight", facecolor='white')
+    buf.seek(0)
+    plt.close(fig)
+
+    logger.info(f"Generated ATM premium chart for {ticker} {dte}DTE {option_type}")
+    return buf

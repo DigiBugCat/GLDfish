@@ -19,10 +19,11 @@ from .utils import (
     identify_required_strikes_by_date,
     align_data_by_timestamp,
     align_historic_data,
+    align_constant_dte_premium_data,
     get_trading_dates,
     collect_earnings_iv_data
 )
-from .chart_generator import create_iv_chart, create_error_chart, create_earnings_iv_chart
+from .chart_generator import create_iv_chart, create_error_chart, create_earnings_iv_chart, create_atm_premium_chart
 from .database import ChartDatabase
 
 # Load environment variables
@@ -48,7 +49,7 @@ class ChartControlView(View):
         self.user_id = user_id
         self.bot = bot_instance
 
-    @discord.ui.button(label="◀ Prev Exp", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀ Prev Exp", style=discord.ButtonStyle.secondary, custom_id="iv_chart_prev_exp")
     async def prev_expiration_button(self, interaction: discord.Interaction, button: Button):
         """Navigate to previous expiration date."""
         await interaction.response.defer()
@@ -237,7 +238,7 @@ class ChartControlView(View):
             logger.error(f"Error navigating to previous expiration: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
-    @discord.ui.button(label="Swap Call/Put", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Swap Call/Put", style=discord.ButtonStyle.secondary, custom_id="iv_chart_swap")
     async def swap_option_type_button(self, interaction: discord.Interaction, button: Button):
         """Swap between call and put options."""
         await interaction.response.defer()
@@ -399,7 +400,7 @@ class ChartControlView(View):
             logger.error(f"Error swapping option type: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
-    @discord.ui.button(label="Next Exp ▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Next Exp ▶", style=discord.ButtonStyle.secondary, custom_id="iv_chart_next_exp")
     async def next_expiration_button(self, interaction: discord.Interaction, button: Button):
         """Navigate to next expiration date."""
         await interaction.response.defer()
@@ -588,7 +589,7 @@ class ChartControlView(View):
             logger.error(f"Error navigating to next expiration: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, emoji="🔄")
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, emoji="🔄", custom_id="iv_chart_refresh")
     async def refresh_button(self, interaction: discord.Interaction, button: Button):
         """Refresh the chart with latest data."""
         await interaction.response.defer()
@@ -761,7 +762,7 @@ class ChartControlView(View):
             logger.error(f"Error refreshing chart: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Error refreshing chart: {str(e)}", ephemeral=True)
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, emoji="🗑️")
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="iv_chart_delete")
     async def delete_button(self, interaction: discord.Interaction, button: Button):
         """Delete the chart (only original requester can delete)."""
         # Only allow the user who requested the chart to delete it
@@ -779,6 +780,177 @@ class ChartControlView(View):
             logger.info(f"Successfully deleted chart {interaction.message.id}")
         except Exception as e:
             logger.error(f"Error deleting chart: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ Error deleting chart: {str(e)}", ephemeral=True)
+
+
+class ATMPremiumControlView(View):
+    """View with buttons for ATM premium chart refresh and delete."""
+
+    def __init__(self, ticker: str, dte: int, option_type: str, days: int, user_id: int, bot_instance):
+        super().__init__(timeout=None)  # Never timeout
+        self.ticker = ticker
+        self.dte = dte
+        self.option_type = option_type
+        self.days = days
+        self.user_id = user_id
+        self.bot = bot_instance
+
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.primary, custom_id="atm_premium_refresh")
+    async def refresh_button(self, interaction: discord.Interaction, button: Button):
+        """Refresh the ATM premium chart with latest data."""
+        await interaction.response.defer()
+
+        try:
+            logger.info(f"Refreshing ATM premium chart for {self.ticker} {self.dte}DTE {self.option_type}")
+
+            await interaction.edit_original_response(
+                content=f"🔄 Refreshing {self.ticker} {self.dte}DTE {self.option_type} chart..."
+            )
+
+            # Determine mode
+            use_intraday = self.days <= 7
+            candle_size = "1m" if use_intraday else "4h"
+
+            # Fetch stock data
+            ohlc_data = await self.bot.uw_client.get_ohlc_data(
+                ticker=self.ticker,
+                candle_size=candle_size,
+                days_back=self.days
+            )
+
+            if not ohlc_data:
+                await interaction.followup.send("❌ Could not fetch stock data", ephemeral=True)
+                return
+
+            # Align with ATM premium at constant DTE
+            aligned_data = await align_constant_dte_premium_data(
+                client=self.bot.uw_client,
+                ticker=self.ticker,
+                ohlc_data=ohlc_data,
+                target_dte=self.dte,
+                option_type=self.option_type,
+                use_intraday=use_intraday
+            )
+
+            if not aligned_data:
+                await interaction.followup.send("❌ Could not fetch option premium data", ephemeral=True)
+                return
+
+            # Generate chart
+            chart_buffer = create_atm_premium_chart(
+                data=aligned_data,
+                ticker=self.ticker,
+                dte=self.dte,
+                option_type=self.option_type,
+                days=self.days
+            )
+
+            # Edit message
+            file = discord.File(chart_buffer, filename="atm_premium_chart.png")
+            await interaction.edit_original_response(
+                content=f"**{self.ticker} Stock Price vs {self.dte} DTE ATM {self.option_type.capitalize()} Premium**",
+                attachments=[file]
+            )
+
+            logger.info(f"Successfully refreshed ATM premium chart for {self.ticker}")
+
+        except Exception as e:
+            logger.error(f"Error refreshing ATM premium chart: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+    @discord.ui.button(label="🔀 Swap Call/Put", style=discord.ButtonStyle.secondary, custom_id="atm_premium_swap")
+    async def swap_option_type_button(self, interaction: discord.Interaction, button: Button):
+        """Swap between call and put options."""
+        await interaction.response.defer()
+
+        try:
+            # Toggle option type
+            new_option_type = "put" if self.option_type == "call" else "call"
+
+            logger.info(f"Swapping ATM premium from {self.option_type} to {new_option_type}")
+
+            await interaction.edit_original_response(
+                content=f"🔀 Switching to {new_option_type}s for {self.ticker} {self.dte}DTE..."
+            )
+
+            # Determine mode
+            use_intraday = self.days <= 7
+            candle_size = "1m" if use_intraday else "4h"
+
+            # Fetch stock data
+            ohlc_data = await self.bot.uw_client.get_ohlc_data(
+                ticker=self.ticker,
+                candle_size=candle_size,
+                days_back=self.days
+            )
+
+            if not ohlc_data:
+                await interaction.followup.send("❌ Could not fetch stock data", ephemeral=True)
+                return
+
+            # Align with ATM premium at constant DTE
+            aligned_data = await align_constant_dte_premium_data(
+                client=self.bot.uw_client,
+                ticker=self.ticker,
+                ohlc_data=ohlc_data,
+                target_dte=self.dte,
+                option_type=new_option_type,
+                use_intraday=use_intraday
+            )
+
+            if not aligned_data:
+                await interaction.followup.send(f"❌ No {new_option_type} premium data found", ephemeral=True)
+                return
+
+            # Generate chart
+            chart_buffer = create_atm_premium_chart(
+                data=aligned_data,
+                ticker=self.ticker,
+                dte=self.dte,
+                option_type=new_option_type,
+                days=self.days
+            )
+
+            # Update database
+            self.bot.db.update_chart(
+                message_id=interaction.message.id,
+                option_type=new_option_type
+            )
+
+            # Update instance variable
+            self.option_type = new_option_type
+
+            # Edit message
+            file = discord.File(chart_buffer, filename="atm_premium_chart.png")
+            await interaction.edit_original_response(
+                content=f"**{self.ticker} Stock Price vs {self.dte} DTE ATM {new_option_type.capitalize()} Premium**",
+                attachments=[file]
+            )
+
+            logger.info(f"Successfully swapped to {new_option_type}")
+
+        except Exception as e:
+            logger.error(f"Error swapping option type: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+    @discord.ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger, custom_id="atm_premium_delete")
+    async def delete_button(self, interaction: discord.Interaction, button: Button):
+        """Delete the chart message."""
+        # Check if user is authorized
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Only the person who requested this chart can delete it.", ephemeral=True)
+            return
+
+        try:
+            # Delete from database
+            self.bot.db.delete_chart(interaction.message.id)
+
+            # Delete the message
+            await interaction.message.delete()
+
+            logger.info(f"Successfully deleted ATM premium chart {interaction.message.id}")
+        except Exception as e:
+            logger.error(f"Error deleting ATM premium chart: {e}", exc_info=True)
             await interaction.response.send_message(f"❌ Error deleting chart: {str(e)}", ephemeral=True)
 
 
@@ -836,6 +1008,46 @@ class IVBot(commands.Bot):
     async def on_ready(self):
         """Called when bot is ready."""
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
+
+        # Register persistent views from database
+        # This ensures buttons continue working after bot restarts
+        cursor = self.db.conn.execute("SELECT message_id, ticker, chart_type, expiration, dte, option_type, days, user_id FROM chart_messages")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            message_id = row[0]
+            ticker = row[1]
+            chart_type = row[2]
+            expiration = row[3]
+            dte = row[4]
+            option_type = row[5]
+            days = row[6]
+            user_id = row[7]
+
+            if chart_type == 'atm_premium':
+                # Register ATM premium view
+                view = ATMPremiumControlView(
+                    ticker=ticker,
+                    dte=dte,
+                    option_type=option_type,
+                    days=days,
+                    user_id=user_id,
+                    bot_instance=self
+                )
+                self.add_view(view, message_id=message_id)
+            else:
+                # Register IV chart view
+                view = ChartControlView(
+                    ticker=ticker,
+                    expiration=expiration,
+                    option_type=option_type,
+                    days=days,
+                    user_id=user_id,
+                    bot_instance=self
+                )
+                self.add_view(view, message_id=message_id)
+
+        logger.info(f"Registered {len(rows)} persistent views")
         logger.info("------")
 
 
@@ -1701,6 +1913,153 @@ async def eight_ball(
         logger.error(f"Error in 8ball command: {e}", exc_info=True)
         await interaction.edit_original_response(
             content=f"❌ The oracle's vision is clouded: {str(e)}"
+        )
+
+
+@bot.tree.command(
+    name="atm_premium",
+    description="Track ATM option premium at constant DTE over time"
+)
+@app_commands.describe(
+    ticker="Stock ticker symbol (e.g., AAPL)",
+    dte="Days to expiration to track (e.g., 30 = always track 30 DTE options)",
+    option_type="Call or Put",
+    days="Lookback period in days: 1-250 (≤7d=1m data, >7d=4h+EOD data) [default: 5]"
+)
+@app_commands.choices(option_type=[
+    app_commands.Choice(name="Call", value="call"),
+    app_commands.Choice(name="Put", value="put")
+])
+@is_dm_whitelisted()
+async def atm_premium(
+    interaction: discord.Interaction,
+    ticker: str,
+    dte: app_commands.Range[int, 1, 365],
+    option_type: app_commands.Choice[str],
+    days: app_commands.Range[int, 1, 250] = 5
+):
+    """Generate ATM premium chart at constant DTE."""
+    await interaction.response.defer()
+
+    try:
+        logger.info(
+            f"Processing ATM premium request: {ticker} {dte}DTE {option_type.value} "
+            f"({days} days lookback)"
+        )
+
+        # Validate and normalize inputs
+        ticker = ticker.upper()
+        option_type_str = option_type.value
+
+        # Determine mode based on lookback period
+        use_intraday = days <= 7
+
+        if use_intraday:
+            logger.info(f"Using INTRADAY mode for {days} days (1m candles + intraday option data)")
+            candle_size = "1m"
+        else:
+            logger.info(f"Using HISTORIC mode for {days} days (4h candles + historic option data)")
+            candle_size = "4h"
+
+        # Step 1: Fetch stock OHLC data
+        await interaction.edit_original_response(
+            content=f"📊 Fetching {days} days of price data for {ticker}... ({candle_size} candles)"
+        )
+
+        ohlc_data = await bot.uw_client.get_ohlc_data(
+            ticker=ticker,
+            candle_size=candle_size,
+            days_back=days
+        )
+
+        if not ohlc_data:
+            await interaction.edit_original_response(
+                content=f"❌ No price data found for {ticker}"
+            )
+            return
+
+        logger.info(f"Fetched {len(ohlc_data)} OHLC candles")
+
+        # Step 2: Align data with ATM premium at constant DTE
+        await interaction.edit_original_response(
+            content=f"🔍 Finding {dte} DTE ATM {option_type_str} contracts over time..."
+        )
+
+        aligned_data = await align_constant_dte_premium_data(
+            client=bot.uw_client,
+            ticker=ticker,
+            ohlc_data=ohlc_data,
+            target_dte=dte,
+            option_type=option_type_str,
+            use_intraday=use_intraday
+        )
+
+        if not aligned_data:
+            await interaction.edit_original_response(
+                content=f"❌ No option premium data found for {ticker} at {dte} DTE"
+            )
+            return
+
+        logger.info(f"Aligned {len(aligned_data)} data points")
+
+        # Step 3: Generate chart
+        await interaction.edit_original_response(
+            content=f"📈 Generating chart..."
+        )
+
+        chart_buffer = create_atm_premium_chart(
+            data=aligned_data,
+            ticker=ticker,
+            dte=dte,
+            option_type=option_type_str,
+            days=days
+        )
+
+        # Create persistent button view
+        view = ATMPremiumControlView(
+            ticker=ticker,
+            dte=dte,
+            option_type=option_type_str,
+            days=days,
+            user_id=interaction.user.id,
+            bot_instance=bot
+        )
+
+        # Send chart with buttons
+        file = discord.File(chart_buffer, filename="atm_premium_chart.png")
+        await interaction.edit_original_response(
+            content=f"**{ticker} Stock Price vs {dte} DTE ATM {option_type_str.capitalize()} Premium**",
+            attachments=[file],
+            view=view
+        )
+
+        # Store in database for button persistence
+        message = await interaction.original_response()
+        bot.db.store_chart(
+            message_id=message.id,
+            channel_id=interaction.channel_id,
+            user_id=interaction.user.id,
+            ticker=ticker,
+            option_type=option_type_str,
+            days=days,
+            chart_type='atm_premium',
+            dte=dte
+        )
+
+        logger.info(f"Successfully generated ATM premium chart for {ticker} {dte}DTE {option_type_str}")
+
+    except ValueError as e:
+        logger.error(f"Validation error in atm_premium command: {e}")
+        await interaction.edit_original_response(
+            content=f"❌ Error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error in atm_premium command: {e}", exc_info=True)
+        error_chart = create_error_chart(str(e))
+        file = discord.File(error_chart, filename="error_chart.png")
+        await interaction.edit_original_response(
+            content=f"❌ Error generating chart",
+            attachments=[file]
         )
 
 

@@ -359,6 +359,369 @@ def align_historic_data(
     return aligned_data
 
 
+async def align_constant_dte_premium_data(
+    client,
+    ticker: str,
+    ohlc_data: List[Dict[str, Any]],
+    target_dte: int,
+    option_type: str,
+    use_intraday: bool = False
+) -> List[Dict[str, Any]]:
+    """Align stock OHLC data with ATM option premium at constant DTE.
+
+    For each timestamp in the OHLC data, finds the option contract that:
+    1. Expires approximately N days out (target_dte)
+    2. Is ATM (closest strike to spot price at that moment)
+    3. Matches the specified option type (call/put)
+
+    Then extracts the option premium and IV for that contract.
+
+    Args:
+        client: UnusualWhalesClient instance
+        ticker: Stock symbol
+        ohlc_data: List of OHLC candles with timestamps
+        target_dte: Days to expiration to track (e.g., 30 = always track 30 DTE options)
+        option_type: "call" or "put"
+        use_intraday: If True, use intraday data (≤7 days); if False, use historic data
+
+    Returns:
+        List of aligned data points with:
+        - timestamp: Timestamp of the data point
+        - stock_price: Stock close price
+        - option_premium: Option price/premium
+        - iv: Implied volatility
+        - actual_dte: Actual days to expiration (may differ from target)
+        - contract_symbol: Option contract symbol used
+        - strike: Strike price of the contract
+    """
+    logger.info(f"Aligning constant {target_dte} DTE {option_type} premium data for {ticker}")
+
+    # Convert option type to code
+    opt_type_code = 'C' if option_type.lower() == 'call' else 'P'
+
+    # PHASE 1: Collect all contract IDs we need to fetch
+    logger.info("PHASE 1: Collecting contract IDs...")
+
+    # Group OHLC data by date for optimization
+    ohlc_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for candle in ohlc_data:
+        timestamp_str = candle.get("start_time") or candle.get("timestamp") or candle.get("date")
+        if not timestamp_str:
+            continue
+
+        try:
+            # Parse timestamp to extract date
+            if 'T' in timestamp_str or 'Z' in timestamp_str:
+                # Intraday format: ISO 8601
+                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                date_str = dt.strftime("%Y-%m-%d")
+            else:
+                # Daily format: YYYY-MM-DD
+                date_str = timestamp_str
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+
+            if date_str not in ohlc_by_date:
+                ohlc_by_date[date_str] = []
+            ohlc_by_date[date_str].append({
+                'candle': candle,
+                'datetime': dt,
+                'timestamp_str': timestamp_str
+            })
+        except Exception as e:
+            logger.warning(f"Could not parse timestamp {timestamp_str}: {e}")
+            continue
+
+    logger.info(f"Grouped {len(ohlc_data)} candles into {len(ohlc_by_date)} dates")
+
+    # Collect contracts to fetch
+    contracts_to_fetch = set()
+    contract_metadata = {}  # contract_id -> list of (date_str, timestamp_str, spot_price, target_exp_date)
+
+    for date_str, candle_group in ohlc_by_date.items():
+        analysis_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        # Calculate target expiration
+        target_exp_date = analysis_date + timedelta(days=target_dte)
+
+        # Find nearest Friday (standard option expiration)
+        primary_exp = find_nearest_expiration(target_exp_date)
+
+        # Try ±1 week for flexibility
+        expirations_to_try = [
+            primary_exp - timedelta(weeks=1),
+            primary_exp,
+            primary_exp + timedelta(weeks=1)
+        ]
+
+        # Get spot price for this date (use close of last candle of the day)
+        spot_price = float(candle_group[-1]['candle'].get('close', 0))
+        if spot_price == 0:
+            continue
+
+        # Generate smart strikes around spot
+        strikes = generate_smart_strikes(spot_price, max_strikes=6)
+
+        # Build contract IDs
+        for exp_date in expirations_to_try:
+            for strike in strikes:
+                exp_str = exp_date.strftime("%y%m%d")
+                strike_code = f"{int(strike * 1000):08d}"
+                contract_id = f"{ticker}{exp_str}{opt_type_code}{strike_code}"
+
+                contracts_to_fetch.add(contract_id)
+
+                # Store metadata for each candle in this date
+                if contract_id not in contract_metadata:
+                    contract_metadata[contract_id] = []
+
+                for candle_info in candle_group:
+                    contract_metadata[contract_id].append({
+                        'date_str': date_str,
+                        'timestamp_str': candle_info['timestamp_str'],
+                        'spot_price': spot_price,
+                        'target_exp_date': exp_date,
+                        'strike': strike,
+                        'datetime': candle_info['datetime']
+                    })
+
+    logger.info(f"PHASE 1 complete: Collected {len(contracts_to_fetch)} unique contracts to fetch")
+
+    # PHASE 2: Fetch all contracts concurrently
+    logger.info("PHASE 2: Fetching contract data...")
+
+    async def fetch_contract_data(contract_id: str):
+        """Fetch either intraday or historic data for a contract."""
+        try:
+            if use_intraday:
+                # For intraday, we need to fetch for each date separately
+                # This is handled differently - return contract_id for now
+                return (contract_id, 'intraday')
+            else:
+                # For historic, fetch once per contract
+                historic_records = await client.get_option_historic(contract_id)
+                return (contract_id, historic_records)
+        except Exception as e:
+            logger.debug(f"Failed to fetch {contract_id}: {e}")
+            return (contract_id, None)
+
+    # Fetch all contracts
+    if not use_intraday:
+        # Historic mode: fetch all contracts at once
+        fetch_tasks = [fetch_contract_data(cid) for cid in contracts_to_fetch]
+        fetch_results = await asyncio.gather(*fetch_tasks)
+
+        # Build cache
+        historic_cache = {}
+        for contract_id, records in fetch_results:
+            if records is not None and records != 'intraday':
+                historic_cache[contract_id] = records
+
+        logger.info(f"PHASE 2 complete: Fetched {len(historic_cache)}/{len(contracts_to_fetch)} contracts")
+    else:
+        # Intraday mode: fetch data per date for all contracts
+        logger.info("PHASE 2: Intraday mode - fetching by date...")
+
+        async def fetch_intraday_for_contract_date(contract_id: str, date_str: str):
+            """Fetch intraday data for a specific contract on a specific date."""
+            try:
+                intraday_records = await client.get_option_intraday(contract_id, date_str)
+                return (contract_id, date_str, intraday_records)
+            except Exception as e:
+                logger.debug(f"Failed to fetch intraday {contract_id} on {date_str}: {e}")
+                return (contract_id, date_str, None)
+
+        # Build tasks for contract/date combinations (optimized: only fetch contracts for dates they're needed)
+        intraday_tasks = []
+        for contract_id, metadata_list in contract_metadata.items():
+            # Get unique dates this contract is actually needed for
+            dates_needed = set(m['date_str'] for m in metadata_list)
+            for date_str in dates_needed:
+                intraday_tasks.append(fetch_intraday_for_contract_date(contract_id, date_str))
+
+        logger.info(f"Fetching {len(intraday_tasks)} intraday contract/date combinations...")
+        intraday_results = await asyncio.gather(*intraday_tasks)
+
+        # Build cache with timestamp lookup: {contract_id: {date: {timestamp: record}}}
+        historic_cache = {}
+        for contract_id, date_str, records in intraday_results:
+            if records:
+                if contract_id not in historic_cache:
+                    historic_cache[contract_id] = {}
+
+                # Build timestamp lookup for this contract/date
+                timestamp_lookup = {}
+                for record in records:
+                    record_timestamp = record.get('start_time') or record.get('timestamp')
+                    if record_timestamp:
+                        timestamp_lookup[record_timestamp] = record
+
+                historic_cache[contract_id][date_str] = timestamp_lookup
+
+        logger.info(f"PHASE 2 complete: Fetched intraday data for {len(historic_cache)} contracts")
+
+    # PHASE 3: Process data and build aligned results
+    logger.info("PHASE 3: Building aligned dataset...")
+    aligned_data = []
+
+    for candle in ohlc_data:
+        timestamp_str = candle.get("start_time") or candle.get("timestamp") or candle.get("date")
+        if not timestamp_str:
+            continue
+
+        try:
+            # Parse timestamp
+            if 'T' in timestamp_str or 'Z' in timestamp_str:
+                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                date_str = dt.strftime("%Y-%m-%d")
+            else:
+                date_str = timestamp_str
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+
+            spot_price = float(candle.get('close', 0))
+            if spot_price == 0:
+                continue
+
+            # Calculate target expiration for this timestamp
+            analysis_date = dt.date()
+            target_exp_date = analysis_date + timedelta(days=target_dte)
+
+            # Find best matching contract
+            best_premium = None
+            best_iv = None
+            best_contract = None
+            best_strike = None
+            best_exp_date = None
+
+            # Search through contracts that might match this timestamp
+            for contract_id, metadata_list in contract_metadata.items():
+                for metadata in metadata_list:
+                    # Match by date (for historic) or timestamp (for intraday)
+                    if metadata['date_str'] != date_str:
+                        continue
+
+                    strike = metadata['strike']
+                    exp_date = metadata['target_exp_date']
+
+                    # Get data from cache
+                    if use_intraday:
+                        # Intraday mode: O(1) lookup by contract_id, date, and timestamp
+                        contract_data = historic_cache.get(contract_id)
+                        if not contract_data:
+                            continue
+
+                        timestamp_lookup = contract_data.get(date_str)
+                        if not timestamp_lookup:
+                            continue
+
+                        # Direct timestamp lookup (O(1) instead of O(n))
+                        record = timestamp_lookup.get(timestamp_str)
+                        if record:
+                            # Extract premium and IV from intraday data
+                            premium_str = record.get('close')  # Intraday uses 'close' field
+                            iv_str = record.get('iv') or record.get('iv_high') or record.get('iv_low')
+
+                            if premium_str:
+                                try:
+                                    premium = float(premium_str)
+                                    # IV is already in decimal format, convert to percentage
+                                    iv = float(iv_str) * 100 if iv_str else None
+
+                                    # Check if this strike is closer to ATM than current best
+                                    strike_distance = abs(strike - spot_price)
+
+                                    if best_premium is None:
+                                        # First valid option found
+                                        best_premium = premium
+                                        best_iv = iv
+                                        best_contract = contract_id
+                                        best_strike = strike
+                                        best_exp_date = exp_date
+                                    else:
+                                        # Compare strike distance
+                                        best_strike_distance = abs(best_strike - spot_price)
+                                        if strike_distance < best_strike_distance:
+                                            best_premium = premium
+                                            best_iv = iv
+                                            best_contract = contract_id
+                                            best_strike = strike
+                                            best_exp_date = exp_date
+                                except:
+                                    pass
+                    else:
+                        # Historic mode: lookup by contract_id and date
+                        records = historic_cache.get(contract_id)
+                        if not records:
+                            continue
+
+                        # Find record for this date
+                        for record in records:
+                            if record.get('date') == date_str:
+                                # Extract premium and IV
+                                premium_str = record.get('last_price')
+                                iv_str = record.get('implied_volatility')
+
+                                if premium_str:
+                                    try:
+                                        premium = float(premium_str)
+                                        iv = float(iv_str) * 100 if iv_str else None
+
+                                        # Check if this strike is closer to ATM than current best
+                                        strike_distance = abs(strike - spot_price)
+
+                                        if best_premium is None:
+                                            # First valid option found
+                                            best_premium = premium
+                                            best_iv = iv
+                                            best_contract = contract_id
+                                            best_strike = strike
+                                            best_exp_date = exp_date
+                                        else:
+                                            # Compare strike distance
+                                            best_strike_distance = abs(best_strike - spot_price)
+                                            if strike_distance < best_strike_distance:
+                                                best_premium = premium
+                                                best_iv = iv
+                                                best_contract = contract_id
+                                                best_strike = strike
+                                                best_exp_date = exp_date
+                                    except:
+                                        pass
+                                break
+
+            # Calculate actual DTE if we found a contract
+            actual_dte = None
+            if best_exp_date:
+                actual_dte = (best_exp_date - analysis_date).days
+
+            # Add to aligned data
+            aligned_data.append({
+                'timestamp': timestamp_str,
+                'stock_price': spot_price,
+                'option_premium': best_premium,
+                'iv': best_iv,
+                'actual_dte': actual_dte,
+                'contract_symbol': best_contract,
+                'strike': best_strike,
+                'open': float(candle.get('open', 0)),
+                'high': float(candle.get('high', 0)),
+                'low': float(candle.get('low', 0)),
+                'volume': int(candle.get('volume', 0)),
+                'market_time': candle.get('market_time')
+            })
+
+        except Exception as e:
+            logger.warning(f"Error processing candle at {timestamp_str}: {e}")
+            continue
+
+    logger.info(f"PHASE 3 complete: Aligned {len(aligned_data)} data points")
+
+    # Log summary statistics
+    valid_premium_count = sum(1 for d in aligned_data if d['option_premium'] is not None)
+    logger.info(f"Found premium data for {valid_premium_count}/{len(aligned_data)} timestamps")
+
+    return aligned_data
+
+
 def get_trading_dates(days_back: int) -> List[str]:
     """Generate list of trading dates going back N days.
 
